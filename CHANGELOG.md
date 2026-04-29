@@ -7,6 +7,13 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 ## [Unreleased]
 
+## [v02.00.04] - 2026-04-29
+
+### Fixed
+
+- Removed the CodeQL `js/file-system-race` alert in session event persistence by appending `events.ndjson` under the session lock instead of reading/appending through an unlocked race window.
+- Bumped the SDK package/runtime version to `2.0.4-alpha.0`.
+
 ## [v02.00.03] - 2026-04-29
 
 ### Added

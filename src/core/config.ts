@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { AppConfig, PeerId } from "./types.js";
 
-export const VERSION = "2.0.3-alpha.0";
+export const VERSION = "2.0.4-alpha.0";
 export const RELEASE_DATE = "2026-04-29";
 
 const __filename = fileURLToPath(import.meta.url);

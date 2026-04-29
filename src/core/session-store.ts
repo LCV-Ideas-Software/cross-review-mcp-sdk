@@ -214,17 +214,23 @@ export class SessionStore {
   }
 
   appendEvent(event: RuntimeEvent): void {
-    if (!event.session_id) return;
+    const sessionId = event.session_id;
+    if (!sessionId) return;
     try {
-      const file = this.eventsPath(event.session_id);
-      const seq = fs.existsSync(file)
-        ? fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean).length + 1
-        : 1;
-      fs.appendFileSync(
-        file,
-        `${JSON.stringify({ ...event, seq, ts: event.ts ?? now() })}\n`,
-        "utf8",
-      );
+      this.withSessionLock(sessionId, () => {
+        const file = this.eventsPath(sessionId);
+        let seq = 1;
+        try {
+          seq = fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean).length + 1;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        fs.appendFileSync(
+          file,
+          `${JSON.stringify({ ...event, seq, ts: event.ts ?? now() })}\n`,
+          "utf8",
+        );
+      });
     } catch {
       // Event persistence must never break provider calls or MCP responses.
     }
