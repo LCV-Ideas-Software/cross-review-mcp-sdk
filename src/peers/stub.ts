@@ -50,34 +50,47 @@ export class StubAdapter extends BasePeerAdapter implements PeerAdapter {
       peer: this.id,
       message: "stub review",
     });
+    if (prompt.includes("FORCE_MODERATION_FAIL_UNRECOVERABLE")) {
+      throw new Error("Invalid prompt: prompt flagged by moderation policy.");
+    }
+    if (
+      prompt.includes("FORCE_MODERATION_FAIL") &&
+      !prompt.includes("Compact Moderation-Safe Review")
+    ) {
+      throw new Error("Invalid prompt: prompt flagged by moderation policy.");
+    }
     const text = prompt.includes("Cross Review - Format Recovery")
-      ? JSON.stringify({
-          status: "READY",
-          summary: "Stub recovered the previous unparseable response.",
-          confidence: "verified",
-          evidence_sources: [],
-          caller_requests: [],
-          follow_ups: [],
-        })
-      : prompt.includes("FORCE_BAD_FORMAT")
-        ? "I am READY, but this intentionally lacks the required machine-readable status object."
-        : prompt.includes("FORCE_NOT_READY") || prompt.includes("FORCE_NEEDS_EVIDENCE")
-          ? JSON.stringify({
-              status: prompt.includes("FORCE_NEEDS_EVIDENCE") ? "NEEDS_EVIDENCE" : "NOT_READY",
-              summary: "Stub detected a test marker.",
-              confidence: "verified",
-              evidence_sources: [],
-              caller_requests: ["Remove the test marker."],
-              follow_ups: [],
-            })
-          : JSON.stringify({
-              status: "READY",
-              summary: "Stub approved the test round.",
-              confidence: "verified",
-              evidence_sources: [],
-              caller_requests: [],
-              follow_ups: [],
-            });
+      ? prompt.includes("FORCE_RECOVERY_FAIL")
+        ? "Still no machine-readable status."
+        : JSON.stringify({
+            status: "READY",
+            summary: "Stub recovered the previous unparseable response.",
+            confidence: "verified",
+            evidence_sources: [],
+            caller_requests: [],
+            follow_ups: [],
+          })
+      : prompt.includes("FORCE_BAD_FORMAT_UNRECOVERABLE")
+        ? "I am READY, but this intentionally lacks JSON. FORCE_RECOVERY_FAIL"
+        : prompt.includes("FORCE_BAD_FORMAT")
+          ? "I am READY, but this intentionally lacks the required machine-readable status object."
+          : prompt.includes("FORCE_NOT_READY") || prompt.includes("FORCE_NEEDS_EVIDENCE")
+            ? JSON.stringify({
+                status: prompt.includes("FORCE_NEEDS_EVIDENCE") ? "NEEDS_EVIDENCE" : "NOT_READY",
+                summary: "Stub detected a test marker.",
+                confidence: "verified",
+                evidence_sources: [],
+                caller_requests: ["Remove the test marker."],
+                follow_ups: [],
+              })
+            : JSON.stringify({
+                status: "READY",
+                summary: "Stub approved the test round.",
+                confidence: "verified",
+                evidence_sources: [],
+                caller_requests: [],
+                follow_ups: [],
+              });
     return this.resultFromText({
       text,
       raw: { stub: true },

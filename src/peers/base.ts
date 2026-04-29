@@ -7,7 +7,7 @@ import type {
   TokenUsage,
 } from "../core/types.js";
 import { estimateCost } from "../core/cost.js";
-import { parsePeerStatus } from "../core/status.js";
+import { decisionQualityFromStatus, parsePeerStatus } from "../core/status.js";
 
 export abstract class BasePeerAdapter {
   abstract id: PeerId;
@@ -60,6 +60,8 @@ export abstract class BasePeerAdapter {
       latency_ms: Date.now() - params.started,
       attempts: params.attempts,
       parser_warnings: parserWarnings,
+      decision_quality:
+        modelMatch === false ? "failed" : decisionQualityFromStatus(parsed.status, parserWarnings),
     };
   }
 

@@ -6,10 +6,13 @@ import type {
   ConvergenceResult,
   ConvergenceScope,
   GenerationResult,
+  GenerationArtifact,
   PeerFailure,
   PeerId,
   PeerProbeResult,
   PeerResult,
+  RuntimeEvent,
+  SessionEvent,
   ReviewRound,
   ReviewStatus,
   SessionMeta,
@@ -69,6 +72,10 @@ export class SessionStore {
     return path.join(this.sessionDir(sessionId), "meta.json");
   }
 
+  eventsPath(sessionId: string): string {
+    return path.join(this.sessionDir(sessionId), "events.ndjson");
+  }
+
   assertSessionId(sessionId: string): void {
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(sessionId)) {
       throw new Error(`invalid session_id: ${sessionId}`);
@@ -92,6 +99,21 @@ export class SessionStore {
   private sleepSync(ms: number): void {
     const buffer = new SharedArrayBuffer(4);
     Atomics.wait(new Int32Array(buffer), 0, 0, ms);
+  }
+
+  private totalsFor(meta: SessionMeta): SessionMeta["totals"] {
+    const peerResults = meta.rounds.flatMap((round) => round.peers);
+    const generations = meta.generation_files ?? [];
+    return {
+      usage: mergeUsage([
+        ...peerResults.map((peer) => peer.usage),
+        ...generations.map((generation) => generation.usage),
+      ]),
+      cost: mergeCost([
+        ...peerResults.map((peer) => peer.cost),
+        ...generations.map((generation) => generation.cost),
+      ]),
+    };
   }
 
   private withSessionLock<T>(sessionId: string, fn: () => T): T {
@@ -191,6 +213,34 @@ export class SessionStore {
     return readJson<SessionMeta>(this.metaPath(sessionId));
   }
 
+  appendEvent(event: RuntimeEvent): void {
+    if (!event.session_id) return;
+    try {
+      const file = this.eventsPath(event.session_id);
+      const seq = fs.existsSync(file)
+        ? fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean).length + 1
+        : 1;
+      fs.appendFileSync(
+        file,
+        `${JSON.stringify({ ...event, seq, ts: event.ts ?? now() })}\n`,
+        "utf8",
+      );
+    } catch {
+      // Event persistence must never break provider calls or MCP responses.
+    }
+  }
+
+  readEvents(sessionId: string, sinceSeq = 0): SessionEvent[] {
+    const file = this.eventsPath(sessionId);
+    if (!fs.existsSync(file)) return [];
+    return fs
+      .readFileSync(file, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line, index) => ({ seq: index + 1, ...JSON.parse(line) }) as SessionEvent)
+      .filter((event) => event.seq > sinceSeq);
+  }
+
   list(): SessionMeta[] {
     if (!fs.existsSync(this.sessionsDir())) return [];
     return fs
@@ -226,11 +276,34 @@ export class SessionStore {
       `round-${round}-${result.peer}-${label}.json`,
     );
     writeJson(file, { ...result, text: redact(result.text) });
-    return path.relative(this.sessionDir(sessionId), file).replace(/\\/g, "/");
+    const relativePath = path.relative(this.sessionDir(sessionId), file).replace(/\\/g, "/");
+    this.withSessionLock(sessionId, () => {
+      const meta = this.read(sessionId);
+      const artifact: GenerationArtifact = {
+        ts: now(),
+        round,
+        label,
+        peer: result.peer,
+        path: relativePath,
+        usage: result.usage,
+        cost: result.cost,
+      };
+      meta.generation_files = [...(meta.generation_files ?? []), artifact];
+      meta.totals = this.totalsFor(meta);
+      meta.updated_at = now();
+      writeJson(this.metaPath(sessionId), meta);
+    });
+    return relativePath;
   }
 
   saveFinal(sessionId: string, text: string): string {
     const file = path.join(this.sessionDir(sessionId), "final.md");
+    fs.writeFileSync(file, redact(text), "utf8");
+    return path.relative(this.sessionDir(sessionId), file).replace(/\\/g, "/");
+  }
+
+  saveReport(sessionId: string, text: string): string {
+    const file = path.join(this.sessionDir(sessionId), "session-report.md");
     fs.writeFileSync(file, redact(text), "utf8");
     return path.relative(this.sessionDir(sessionId), file).replace(/\\/g, "/");
   }
@@ -294,10 +367,7 @@ export class SessionStore {
         detail: params.convergence.reason,
       };
       meta.updated_at = now();
-      meta.totals = {
-        usage: mergeUsage(meta.rounds.flatMap((r) => r.peers.map((p) => p.usage))),
-        cost: mergeCost(meta.rounds.flatMap((r) => r.peers.map((p) => p.cost))),
-      };
+      meta.totals = this.totalsFor(meta);
       writeJson(this.metaPath(sessionId), meta);
       return round;
     });

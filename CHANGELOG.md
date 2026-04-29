@@ -7,6 +7,29 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 ## [Unreleased]
 
+## [v02.00.03] - 2026-04-29
+
+### Added
+
+- Added background MCP tools `session_start_round`, `session_start_unanimous`, `session_poll`, `session_events` and `session_report` for long-running real API sessions.
+- Added durable per-session `events.ndjson` and `session-report.md` artifacts.
+- Added per-peer decision quality tracking in convergence results and reports.
+- Added generation artifact accounting so lead-peer drafts and revisions contribute to session token/cost totals.
+- Added configurable provider cost-rate env vars plus optional session budget guard.
+- Added moderation-safe retry handling for provider prompt rejections caused by verbose or policy-sensitive peer history.
+
+### Changed
+
+- Compact prior peer history in follow-up prompts by using structured summaries and requested changes instead of replaying raw peer output.
+- Expanded `run_until_unanimous` with `session_id`, `until_stopped` and `max_cost_usd`.
+- Improved dashboard session cards and added session event/report APIs.
+- Bumped the SDK package/runtime version to `2.0.3-alpha.0`.
+
+### Fixed
+
+- Persisted runtime events through the MCP server and dashboard event sinks instead of keeping them only in process logs.
+- Made parser recovery failures explicit as `unparseable_after_recovery` blockers.
+
 ## [v02.00.02] - 2026-04-29
 
 ### Changed

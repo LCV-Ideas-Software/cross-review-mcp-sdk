@@ -14,6 +14,15 @@ export function checkConvergence(
   const rejectedPeers = rejected.map((f) => f.peer);
   const responded = new Set(peers.map((p) => p.peer));
   const missing = expectedPeers.filter((p) => !responded.has(p) && !rejectedPeers.includes(p));
+  const decisionQuality = Object.fromEntries(
+    peers.map((peer) => [peer.peer, peer.decision_quality]),
+  ) as ConvergenceResult["decision_quality"];
+  const blockingDetails = [
+    ...notReady.map((peer) => `${peer}: NOT_READY`),
+    ...needsEvidence.map((peer) => `${peer}: NEEDS_EVIDENCE`),
+    ...rejected.map((failure) => `${failure.peer}: ${failure.failure_class}`),
+    ...missing.map((peer) => `${peer}: missing response`),
+  ];
 
   if (callerStatus !== "READY") {
     return {
@@ -23,6 +32,8 @@ export function checkConvergence(
       not_ready_peers: notReady,
       needs_evidence_peers: needsEvidence,
       rejected_peers: [...rejectedPeers, ...missing],
+      decision_quality: decisionQuality,
+      blocking_details: [`caller_status=${callerStatus}`, ...blockingDetails],
     };
   }
   if (rejectedPeers.length || missing.length) {
@@ -33,6 +44,8 @@ export function checkConvergence(
       not_ready_peers: notReady,
       needs_evidence_peers: needsEvidence,
       rejected_peers: [...rejectedPeers, ...missing],
+      decision_quality: decisionQuality,
+      blocking_details: blockingDetails,
     };
   }
   if (notReady.length || needsEvidence.length) {
@@ -43,6 +56,8 @@ export function checkConvergence(
       not_ready_peers: notReady,
       needs_evidence_peers: needsEvidence,
       rejected_peers: [],
+      decision_quality: decisionQuality,
+      blocking_details: blockingDetails,
     };
   }
   if (ready.length !== expectedPeers.length) {
@@ -53,6 +68,8 @@ export function checkConvergence(
       not_ready_peers: notReady,
       needs_evidence_peers: needsEvidence,
       rejected_peers: missing,
+      decision_quality: decisionQuality,
+      blocking_details: blockingDetails,
     };
   }
   return {
@@ -62,5 +79,7 @@ export function checkConvergence(
     not_ready_peers: [],
     needs_evidence_peers: [],
     rejected_peers: [],
+    decision_quality: decisionQuality,
+    blocking_details: [],
   };
 }

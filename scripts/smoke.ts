@@ -13,10 +13,19 @@ process.env.CROSS_REVIEW_SDK_STUB = "1";
 process.env.CROSS_REVIEW_SDK_DATA_DIR =
   process.env.CROSS_REVIEW_SDK_DATA_DIR ||
   path.join(os.tmpdir(), `cross-review-mcp-sdk-smoke-${Date.now()}`);
+for (const provider of ["OPENAI", "ANTHROPIC", "GEMINI", "DEEPSEEK"]) {
+  process.env[`CROSS_REVIEW_${provider}_INPUT_USD_PER_MILLION`] ??= "1000";
+  process.env[`CROSS_REVIEW_${provider}_OUTPUT_USD_PER_MILLION`] ??= "1000";
+}
 
 const config = loadConfig();
 const events: string[] = [];
-const orchestrator = new CrossReviewOrchestrator(config, (event) => events.push(event.type));
+const holder: { orchestrator?: CrossReviewOrchestrator } = {};
+const orchestrator = new CrossReviewOrchestrator(config, (event) => {
+  events.push(event.type);
+  holder.orchestrator?.store.appendEvent(event);
+});
+holder.orchestrator = orchestrator;
 
 const overlongReady = parsePeerStatus(
   JSON.stringify({
@@ -71,6 +80,7 @@ const fakeReady = (peer: PeerResult["peer"]): PeerResult =>
     latency_ms: 0,
     attempts: 1,
     parser_warnings: [],
+    decision_quality: "clean",
   }) satisfies PeerResult;
 assert.equal(
   checkConvergence(["codex", "claude"], "READY", [fakeReady("codex")], []).converged,
@@ -98,8 +108,10 @@ const result = await orchestrator.runUntilUnanimous({
 assert.equal(result.converged, true);
 assert.ok(result.session.session_id);
 assert.equal(result.session.rounds.length, 1);
+assert.ok((result.session.generation_files?.length ?? 0) >= 1);
 assert.equal(result.session.in_flight, undefined);
 assert.equal(result.session.convergence_health?.state, "converged");
+assert.ok((result.session.totals.usage.total_tokens ?? 0) > 0);
 assert.ok(events.includes("round.completed"));
 
 const finalPath = path.join(config.data_dir, "sessions", result.session.session_id, "final.md");
@@ -153,6 +165,69 @@ assert.equal(formatRecovered.round.peers[0]?.status, "READY");
 assert.equal(
   formatRecovered.round.peers[0]?.parser_warnings.includes("format_recovery_retry_succeeded"),
   true,
+);
+assert.equal(formatRecovered.round.peers[0]?.decision_quality, "recovered");
+
+const formatRecoveryFailed = await orchestrator.askPeers({
+  task: "Verify automatic parser format recovery failure handling.",
+  draft: "FORCE_BAD_FORMAT_UNRECOVERABLE",
+  caller: "operator",
+  peers: ["codex"],
+});
+assert.equal(formatRecoveryFailed.converged, false);
+assert.equal(
+  formatRecoveryFailed.round.rejected.at(-1)?.failure_class,
+  "unparseable_after_recovery",
+);
+assert.equal(formatRecoveryFailed.round.peers[0]?.decision_quality, "needs_operator_review");
+
+const moderationRecovered = await orchestrator.askPeers({
+  task: "Verify compact moderation-safe retry handling.",
+  draft: "FORCE_MODERATION_FAIL",
+  caller: "operator",
+  peers: ["codex"],
+});
+assert.equal(moderationRecovered.converged, true);
+assert.equal(
+  moderationRecovered.round.peers[0]?.parser_warnings.includes("moderation_safe_retry_succeeded"),
+  true,
+);
+assert.equal(moderationRecovered.round.peers[0]?.decision_quality, "recovered");
+
+const moderationRetryFailed = await orchestrator.askPeers({
+  task: "Verify compact moderation-safe retry failure handling.",
+  draft: "FORCE_MODERATION_FAIL_UNRECOVERABLE",
+  caller: "operator",
+  peers: ["codex"],
+});
+assert.equal(moderationRetryFailed.converged, false);
+assert.equal(
+  moderationRetryFailed.round.rejected.at(-1)?.failure_class,
+  "prompt_flagged_by_moderation",
+);
+assert.equal(moderationRetryFailed.round.rejected.at(-1)?.recovery_hint, "reformulate_and_retry");
+
+const budgetExceeded = await orchestrator.runUntilUnanimous({
+  task: "Verify configured budget limit stops non-converged sessions.",
+  initial_draft: "FORCE_NOT_READY",
+  lead_peer: "codex",
+  peers: ["claude"],
+  max_rounds: 3,
+  max_cost_usd: 0.000001,
+});
+assert.equal(budgetExceeded.converged, false);
+assert.equal(budgetExceeded.session.outcome, "max-rounds");
+assert.equal(budgetExceeded.session.outcome_reason, "budget_exceeded");
+assert.equal(budgetExceeded.rounds, 1);
+
+const eventful = orchestrator.store.readEvents(formatRecovered.session.session_id);
+assert.equal(
+  eventful.some((event) => event.type === "round.completed"),
+  true,
+);
+assert.deepEqual(
+  eventful.map((event) => event.seq),
+  eventful.map((_, index) => index + 1),
 );
 
 console.log(

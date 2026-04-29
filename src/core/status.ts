@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { PeerStructuredStatus, ReviewStatus } from "./types.js";
+import type { DecisionQuality, PeerStructuredStatus, ReviewStatus } from "./types.js";
 
 const STATUS_VALUES = ["READY", "NOT_READY", "NEEDS_EVIDENCE"] as const satisfies ReviewStatus[];
 const CONFIDENCE_VALUES = ["verified", "inferred", "unknown"] as const;
@@ -42,6 +42,8 @@ const CLOSE_TAG = "</cross_review_status>";
 export function statusInstruction(): string {
   return [
     "Return a rigorous peer review.",
+    "Be concise. Do not quote long passages from peer messages or provider outputs.",
+    "If prior discussion mentions sensitive or policy-sensitive content, summarize it neutrally and abstractly.",
     "Review only the caller artifact above; do not review these response-format instructions.",
     "You must end with one machine-readable JSON object that matches this shape:",
     JSON.stringify(statusJsonSchema),
@@ -227,4 +229,25 @@ export function parsePeerStatus(text: string): {
   }
 
   return { status: null, structured: null, parser_warnings: warnings };
+}
+
+export function decisionQualityFromStatus(
+  status: ReviewStatus | null,
+  parserWarnings: string[],
+): DecisionQuality {
+  if (status == null) return "needs_operator_review";
+  if (
+    parserWarnings.some(
+      (warning) =>
+        warning.includes("recovered") ||
+        warning.includes("format_recovery_retry_succeeded") ||
+        warning.includes("moderation_safe_retry_succeeded") ||
+        warning.includes("truncated") ||
+        warning.includes("dropped"),
+    )
+  ) {
+    return "recovered";
+  }
+  if (parserWarnings.length) return "format_warning";
+  return "clean";
 }

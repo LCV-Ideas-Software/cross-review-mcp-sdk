@@ -1,12 +1,15 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { RELEASE_DATE, VERSION, loadConfig } from "../core/config.js";
 import { CrossReviewOrchestrator } from "../core/orchestrator.js";
 import { PEERS } from "../core/types.js";
-import type { PeerId } from "../core/types.js";
+import type { PeerId, RuntimeEvent } from "../core/types.js";
+import { sessionReportMarkdown } from "../core/reports.js";
 import { EventLog } from "../observability/logger.js";
+import { safeErrorMessage } from "../security/redact.js";
 
 const PeerSchema = z.enum(PEERS);
 const ResponseFormatSchema = z.enum(["json", "markdown"]).default("json");
@@ -19,11 +22,84 @@ function textResult(value: unknown, responseFormat = "json") {
   return { content: [{ type: "text" as const, text }] };
 }
 
+type JobKind = "ask_peers" | "run_until_unanimous";
+type JobStatus = {
+  job_id: string;
+  kind: JobKind;
+  session_id: string;
+  status: "running" | "completed" | "failed";
+  started_at: string;
+  completed_at?: string;
+  error?: string;
+  result_summary?: Record<string, unknown>;
+};
+
 function createRuntime() {
   const config = loadConfig();
   const eventLog = new EventLog(config);
-  const orchestrator = new CrossReviewOrchestrator(config, (event) => eventLog.emit(event));
-  return { config, eventLog, orchestrator };
+  const holder: { orchestrator?: CrossReviewOrchestrator } = {};
+  const emit = (event: RuntimeEvent) => {
+    eventLog.emit(event);
+    holder.orchestrator?.store.appendEvent(event);
+  };
+  const orchestrator = new CrossReviewOrchestrator(config, emit);
+  holder.orchestrator = orchestrator;
+  return { config, eventLog, orchestrator, jobs: new Map<string, JobStatus>() };
+}
+
+type Runtime = ReturnType<typeof createRuntime>;
+
+function now(): string {
+  return new Date().toISOString();
+}
+
+function summarizeJobResult(result: unknown): Record<string, unknown> {
+  if (result && typeof result === "object" && "session" in result) {
+    const session = (result as { session?: { session_id?: string; outcome?: string } }).session;
+    return {
+      session_id: session?.session_id,
+      outcome: session?.outcome,
+      converged: "converged" in result ? (result as { converged?: boolean }).converged : undefined,
+      rounds: "rounds" in result ? (result as { rounds?: number }).rounds : undefined,
+    };
+  }
+  return {};
+}
+
+function startJob(
+  runtime: Runtime,
+  kind: JobKind,
+  sessionId: string,
+  run: () => Promise<unknown>,
+): JobStatus {
+  const job: JobStatus = {
+    job_id: crypto.randomUUID(),
+    kind,
+    session_id: sessionId,
+    status: "running",
+    started_at: now(),
+  };
+  runtime.jobs.set(job.job_id, job);
+  void run()
+    .then((result) => {
+      job.status = "completed";
+      job.completed_at = now();
+      job.result_summary = summarizeJobResult(result);
+    })
+    .catch((error) => {
+      job.status = "failed";
+      job.completed_at = now();
+      job.error = safeErrorMessage(error);
+      try {
+        runtime.orchestrator.store.escalateToOperator(sessionId, {
+          reason: `Background job failed: ${job.error}`,
+          severity: "critical",
+        });
+      } catch {
+        // Job state remains available even if the session cannot be updated.
+      }
+    });
+  return job;
 }
 
 export async function main(): Promise<void> {
@@ -61,6 +137,8 @@ export async function main(): Promise<void> {
           data_dir: runtime.config.data_dir,
           log_file: runtime.eventLog.path(),
           stub: runtime.config.stub,
+          retry_timeout_ms: runtime.config.retry.timeout_ms,
+          budget: runtime.config.budget,
           codeql_policy: "Default Setup on GitHub; no advanced workflow committed.",
           secrets_policy: "API keys are read from Windows environment variables only.",
         },
@@ -181,6 +259,53 @@ export async function main(): Promise<void> {
   );
 
   server.registerTool(
+    "session_start_round",
+    {
+      title: "Start Review Round",
+      description:
+        "Start a real peer-review round in the background and return immediately with a session_id/job_id for polling.",
+      inputSchema: z
+        .object({
+          session_id: z.string().uuid().optional(),
+          task: z.string().min(1),
+          draft: z.string().min(1),
+          caller: z.union([PeerSchema, z.literal("operator")]).default("operator"),
+          caller_status: z.enum(["READY", "NOT_READY", "NEEDS_EVIDENCE"]).default("READY"),
+          peers: z
+            .array(PeerSchema)
+            .min(1)
+            .max(4)
+            .default([...PEERS] as PeerId[]),
+          response_format: ResponseFormatSchema,
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ response_format, ...input }) => {
+      const session = input.session_id
+        ? runtime.orchestrator.store.read(input.session_id)
+        : await runtime.orchestrator.initSession(input.task, input.caller);
+      const job = startJob(runtime, "ask_peers", session.session_id, () =>
+        runtime.orchestrator.askPeers({ ...input, session_id: session.session_id }),
+      );
+      return textResult(
+        {
+          session_id: session.session_id,
+          job,
+          poll_tool: "session_poll",
+          events_tool: "session_events",
+        },
+        response_format,
+      );
+    },
+  );
+
+  server.registerTool(
     "run_until_unanimous",
     {
       title: "Run Until Unanimous",
@@ -196,7 +321,9 @@ export async function main(): Promise<void> {
             .min(1)
             .max(4)
             .default([...PEERS] as PeerId[]),
-          max_rounds: z.number().int().min(1).max(100).default(8),
+          max_rounds: z.number().int().min(1).max(1000).default(8),
+          until_stopped: z.boolean().default(false),
+          max_cost_usd: z.number().positive().optional(),
           response_format: ResponseFormatSchema,
         })
         .strict(),
@@ -209,6 +336,154 @@ export async function main(): Promise<void> {
     },
     async ({ response_format, ...input }) =>
       textResult(await runtime.orchestrator.runUntilUnanimous(input), response_format),
+  );
+
+  server.registerTool(
+    "session_start_unanimous",
+    {
+      title: "Start Until Unanimous",
+      description:
+        "Start real API generation/revision rounds in the background until unanimity, max_rounds or budget limit.",
+      inputSchema: z
+        .object({
+          session_id: z.string().uuid().optional(),
+          task: z.string().min(1),
+          initial_draft: z.string().optional(),
+          lead_peer: PeerSchema.default("codex"),
+          peers: z
+            .array(PeerSchema)
+            .min(1)
+            .max(4)
+            .default([...PEERS] as PeerId[]),
+          max_rounds: z.number().int().min(1).max(1000).default(8),
+          until_stopped: z.boolean().default(false),
+          max_cost_usd: z.number().positive().optional(),
+          response_format: ResponseFormatSchema,
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ response_format, ...input }) => {
+      const session = input.session_id
+        ? runtime.orchestrator.store.read(input.session_id)
+        : await runtime.orchestrator.initSession(input.task, input.lead_peer);
+      const job = startJob(runtime, "run_until_unanimous", session.session_id, () =>
+        runtime.orchestrator.runUntilUnanimous({ ...input, session_id: session.session_id }),
+      );
+      return textResult(
+        {
+          session_id: session.session_id,
+          job,
+          poll_tool: "session_poll",
+          events_tool: "session_events",
+        },
+        response_format,
+      );
+    },
+  );
+
+  server.registerTool(
+    "session_poll",
+    {
+      title: "Poll Session",
+      description:
+        "Return durable session state and background job status without waiting for provider calls to finish.",
+      inputSchema: z
+        .object({
+          session_id: z.string().uuid(),
+          response_format: ResponseFormatSchema,
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ session_id, response_format }) => {
+      const session = runtime.orchestrator.store.read(session_id);
+      const jobs = [...runtime.jobs.values()].filter((job) => job.session_id === session_id);
+      return textResult(
+        {
+          session_id,
+          outcome: session.outcome,
+          health: session.convergence_health,
+          in_flight: session.in_flight,
+          rounds: session.rounds.length,
+          latest_round: session.rounds.at(-1) ?? null,
+          jobs,
+        },
+        response_format,
+      );
+    },
+  );
+
+  server.registerTool(
+    "session_events",
+    {
+      title: "Read Session Events",
+      description:
+        "Read durable session events from events.ndjson. Use since_seq to incrementally poll long-running sessions.",
+      inputSchema: z
+        .object({
+          session_id: z.string().uuid(),
+          since_seq: z.number().int().min(0).default(0),
+          response_format: ResponseFormatSchema,
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ session_id, since_seq, response_format }) =>
+      textResult(
+        {
+          session_id,
+          events: runtime.orchestrator.store.readEvents(session_id, since_seq),
+        },
+        response_format,
+      ),
+  );
+
+  server.registerTool(
+    "session_report",
+    {
+      title: "Session Report",
+      description:
+        "Generate and save a Markdown report with convergence, peer decisions, failures, costs and latest events.",
+      inputSchema: z
+        .object({
+          session_id: z.string().uuid(),
+          response_format: ResponseFormatSchema,
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ session_id, response_format }) => {
+      const session = runtime.orchestrator.store.read(session_id);
+      const markdown = sessionReportMarkdown(
+        session,
+        runtime.orchestrator.store.readEvents(session_id),
+      );
+      const path = runtime.orchestrator.store.saveReport(session_id, markdown);
+      return response_format === "markdown"
+        ? textResult(markdown, "markdown")
+        : textResult({ session_id, path, markdown }, response_format);
+    },
   );
 
   server.registerTool(

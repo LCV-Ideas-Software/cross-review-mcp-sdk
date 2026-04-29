@@ -13,10 +13,13 @@ import type {
 } from "./types.js";
 import { PEERS } from "./types.js";
 import { checkConvergence } from "./convergence.js";
+import { sessionReportMarkdown } from "./reports.js";
 import { SessionStore } from "./session-store.js";
+import { decisionQualityFromStatus } from "./status.js";
 import { classifyProviderError } from "../peers/errors.js";
 import { resolveBestModels } from "../peers/model-selection.js";
 import { createAdapters, selectAdapters } from "../peers/registry.js";
+import { redact } from "../security/redact.js";
 
 export interface AskPeersInput {
   session_id?: string;
@@ -34,11 +37,14 @@ export interface AskPeersOutput {
 }
 
 export interface RunUntilUnanimousInput {
+  session_id?: string;
   task: string;
   initial_draft?: string;
   lead_peer?: PeerId;
   peers?: PeerId[];
   max_rounds?: number;
+  until_stopped?: boolean;
+  max_cost_usd?: number;
 }
 
 export interface RunUntilUnanimousOutput {
@@ -56,17 +62,43 @@ function emitNoop(_event: RuntimeEvent): void {
   // Intentionally empty. Callers can inject event sinks for logs, dashboards or MCP progress.
 }
 
+function safePromptText(value: string, maxLength = 4_000): string {
+  const cleaned = redact(value).replace(/\r\n/g, "\n").trim();
+  if (cleaned.length <= maxLength) return cleaned;
+  return `${cleaned.slice(0, maxLength - 3)}...`;
+}
+
+function safePromptList(values: string[] | undefined, maxItems = 8): string {
+  if (!values?.length) return "-";
+  return values
+    .slice(0, maxItems)
+    .map((value) => safePromptText(value, 300))
+    .join("; ");
+}
+
 function summarizePriorRounds(meta: SessionMeta): string {
   if (!meta.rounds.length) return "No prior round.";
   return meta.rounds
     .slice(-5)
     .map((round) => {
       const peerLines = round.peers.map((peer) => {
-        const summary = peer.structured?.summary ?? peer.text.slice(0, 500);
-        return `- ${peer.peer}: ${peer.status ?? "NO_STATUS"} - ${summary}`;
+        const summary = safePromptText(
+          peer.structured?.summary ?? "No structured summary was returned.",
+          700,
+        );
+        const requests = safePromptList(peer.structured?.caller_requests, 6);
+        return [
+          `- ${peer.peer}: ${peer.status ?? "NO_STATUS"} (${peer.decision_quality ?? "unknown"})`,
+          `  summary: ${summary}`,
+          `  requested changes: ${requests}`,
+        ].join("\n");
       });
       const failureLines = round.rejected.map(
-        (failure) => `- ${failure.peer}: FAILURE ${failure.failure_class} - ${failure.message}`,
+        (failure) =>
+          `- ${failure.peer}: FAILURE ${failure.failure_class} - ${safePromptText(
+            failure.message,
+            500,
+          )}`,
       );
       return [
         `Round ${round.round}: ${round.convergence.reason}`,
@@ -75,6 +107,27 @@ function summarizePriorRounds(meta: SessionMeta): string {
       ].join("\n");
     })
     .join("\n\n");
+}
+
+function buildModerationSafeReviewPrompt(meta: SessionMeta, draft: string): string {
+  return [
+    "# Cross Review - Compact Moderation-Safe Review",
+    "",
+    "The previous provider request may have been rejected by an automated safety or moderation filter.",
+    "Review this compact neutral prompt instead. Do not quote any sensitive text verbatim.",
+    "If the compact context is insufficient to decide, return NEEDS_EVIDENCE with precise missing evidence.",
+    "",
+    "## Original Task (sanitized excerpt)",
+    safePromptText(meta.task, 6_000),
+    "",
+    "## Recent History (structured summary only)",
+    summarizePriorRounds(meta),
+    "",
+    "## Draft Or Solution Under Review (sanitized excerpt)",
+    safePromptText(draft, 16_000),
+    "",
+    "Decide whether any blocking issue remains.",
+  ].join("\n");
 }
 
 function buildReviewPrompt(meta: SessionMeta, draft: string): string {
@@ -196,6 +249,35 @@ function silentModelDowngradeFailure(result: PeerResult): PeerFailure {
   };
 }
 
+function unparseableAfterRecoveryFailure(result: PeerResult): PeerFailure {
+  return {
+    peer: result.peer,
+    provider: result.provider,
+    model: result.model,
+    failure_class: "unparseable_after_recovery",
+    message:
+      "Peer response still did not contain a parseable status after one automatic format-recovery retry.",
+    retryable: false,
+    attempts: result.attempts,
+    latency_ms: result.latency_ms,
+  };
+}
+
+function budgetLimit(config: AppConfig, inputLimit?: number): number | undefined {
+  return inputLimit ?? config.budget.max_session_cost_usd;
+}
+
+function budgetExceeded(session: SessionMeta, limit?: number): boolean {
+  const total = session.totals.cost.total_cost;
+  return limit != null && total != null && total > limit;
+}
+
+interface PeerCallOutcome {
+  adapter: PeerAdapter;
+  result?: PeerResult;
+  failure?: PeerFailure;
+}
+
 export class CrossReviewOrchestrator {
   readonly store: SessionStore;
   adapters: Record<PeerId, PeerAdapter>;
@@ -226,6 +308,78 @@ export class CrossReviewOrchestrator {
     return meta;
   }
 
+  private async callPeerForReview(
+    adapter: PeerAdapter,
+    prompt: string,
+    moderationSafePrompt: string,
+    context: Parameters<PeerAdapter["call"]>[1],
+  ): Promise<PeerCallOutcome> {
+    const started = Date.now();
+    try {
+      return { adapter, result: await adapter.call(prompt, context) };
+    } catch (error) {
+      const failure = classifyProviderError(
+        adapter.id,
+        adapter.provider,
+        adapter.model,
+        error,
+        this.config.retry.max_attempts,
+        started,
+      );
+      if (failure.failure_class !== "prompt_flagged_by_moderation") {
+        return { adapter, failure };
+      }
+
+      this.emit({
+        type: "peer.moderation_recovery.started",
+        session_id: context.session_id,
+        round: context.round,
+        peer: adapter.id,
+        message:
+          "Provider rejected the prompt; retrying once with a compact sanitized review prompt.",
+        data: { failure_class: failure.failure_class },
+      });
+
+      try {
+        const recovered = await adapter.call(moderationSafePrompt, context);
+        const parserWarnings = [...recovered.parser_warnings, "moderation_safe_retry_succeeded"];
+        return {
+          adapter,
+          result: {
+            ...recovered,
+            attempts: recovered.attempts + failure.attempts,
+            parser_warnings: parserWarnings,
+            decision_quality: decisionQualityFromStatus(recovered.status, parserWarnings),
+          },
+        };
+      } catch (retryError) {
+        const retryFailure = classifyProviderError(
+          adapter.id,
+          adapter.provider,
+          adapter.model,
+          retryError,
+          this.config.retry.max_attempts,
+          started,
+        );
+        return {
+          adapter,
+          failure: {
+            ...retryFailure,
+            failure_class:
+              retryFailure.failure_class === "prompt_flagged_by_moderation"
+                ? "prompt_flagged_by_moderation"
+                : retryFailure.failure_class,
+            message: `Prompt was rejected and the compact sanitized retry also failed: ${retryFailure.message}`,
+            recovery_hint: "reformulate_and_retry",
+            reformulation_advice:
+              "Compact the prompt, summarize verbose peer content, avoid quoting flagged text, and retry with the same technical intent.",
+            attempts: failure.attempts + retryFailure.attempts,
+          },
+        };
+      }
+    }
+  }
+
   async askPeers(input: AskPeersInput): Promise<AskPeersOutput> {
     const caller = input.caller ?? "operator";
     const callerStatus = input.caller_status ?? "READY";
@@ -247,6 +401,7 @@ export class CrossReviewOrchestrator {
     };
     const draftFile = this.store.saveDraft(session.session_id, roundNumber, input.draft);
     const prompt = buildReviewPrompt(session, input.draft);
+    const moderationSafePrompt = buildModerationSafeReviewPrompt(session, input.draft);
     const promptFile = this.store.savePrompt(session.session_id, roundNumber, prompt);
     this.store.markInFlight(session.session_id, {
       round: roundNumber,
@@ -263,9 +418,9 @@ export class CrossReviewOrchestrator {
       data: { peers: selectedPeers },
     });
 
-    const settled = await Promise.allSettled(
+    const settled = await Promise.all(
       selectAdapters(adapters, selectedPeers).map((adapter) =>
-        adapter.call(prompt, {
+        this.callPeerForReview(adapter, prompt, moderationSafePrompt, {
           session_id: session.session_id,
           round: roundNumber,
           task: session.task,
@@ -277,11 +432,10 @@ export class CrossReviewOrchestrator {
     const peers: PeerResult[] = [];
     const rejected: PeerFailure[] = [];
 
-    for (let index = 0; index < settled.length; index++) {
-      const item = settled[index];
-      const adapter = adapters[selectedPeers[index]];
-      if (item.status === "fulfilled") {
-        let peerResult = item.value;
+    for (const item of settled) {
+      const { adapter } = item;
+      if (item.result) {
+        let peerResult = item.result;
         if (peerResult.status == null && peerResult.model_match !== false) {
           this.store.savePeerResult(
             session.session_id,
@@ -307,17 +461,24 @@ export class CrossReviewOrchestrator {
                 emit: this.emit,
               },
             );
+            const parserWarnings = [
+              ...peerResult.parser_warnings.map((warning) => `original:${warning}`),
+              ...recovered.parser_warnings,
+              recovered.status
+                ? "format_recovery_retry_succeeded"
+                : "format_recovery_retry_returned_no_status",
+            ];
             peerResult = {
               ...recovered,
               attempts: peerResult.attempts + recovered.attempts,
-              parser_warnings: [
-                ...peerResult.parser_warnings.map((warning) => `original:${warning}`),
-                ...recovered.parser_warnings,
-                recovered.status
-                  ? "format_recovery_retry_succeeded"
-                  : "format_recovery_retry_returned_no_status",
-              ],
+              parser_warnings: parserWarnings,
+              decision_quality: decisionQualityFromStatus(recovered.status, parserWarnings),
             };
+            if (peerResult.status == null) {
+              const failure = unparseableAfterRecoveryFailure(peerResult);
+              rejected.push(failure);
+              this.store.savePeerFailure(session.session_id, roundNumber, failure);
+            }
           } catch (error) {
             const failure = classifyProviderError(
               adapter.id,
@@ -338,15 +499,8 @@ export class CrossReviewOrchestrator {
           rejected.push(failure);
           this.store.savePeerFailure(session.session_id, roundNumber, failure);
         }
-      } else {
-        const failure = classifyProviderError(
-          adapter.id,
-          adapter.provider,
-          adapter.model,
-          item.reason,
-          this.config.retry.max_attempts,
-          Date.parse(startedAt),
-        );
+      } else if (item.failure) {
+        const failure = item.failure;
         rejected.push(failure);
         this.store.savePeerFailure(session.session_id, roundNumber, failure);
       }
@@ -389,6 +543,13 @@ export class CrossReviewOrchestrator {
         convergence.recovery_converged ? "recovered_unanimity" : "unanimous_ready",
       );
     }
+    this.store.saveReport(
+      session.session_id,
+      sessionReportMarkdown(
+        this.store.read(session.session_id),
+        this.store.readEvents(session.session_id),
+      ),
+    );
     this.emit({
       type: "round.completed",
       session_id: session.session_id,
@@ -401,9 +562,16 @@ export class CrossReviewOrchestrator {
 
   async runUntilUnanimous(input: RunUntilUnanimousInput): Promise<RunUntilUnanimousOutput> {
     const leadPeer = input.lead_peer ?? "codex";
-    const maxRounds = input.max_rounds && input.max_rounds > 0 ? input.max_rounds : 8;
+    const maxRounds = input.until_stopped
+      ? Number.MAX_SAFE_INTEGER
+      : input.max_rounds && input.max_rounds > 0
+        ? input.max_rounds
+        : 8;
+    const costLimit = budgetLimit(this.config, input.max_cost_usd);
     const selectedPeers = input.peers?.length ? input.peers : [...PEERS];
-    let session = await this.initSession(input.task, leadPeer);
+    let session = input.session_id
+      ? this.store.read(input.session_id)
+      : await this.initSession(input.task, leadPeer);
     const adapters = createAdapters(this.config);
     const reviewerPeers = selectedPeers.filter((peer) => peer !== leadPeer);
     let draft = input.initial_draft;
@@ -434,6 +602,16 @@ export class CrossReviewOrchestrator {
           session: this.store.read(session.session_id),
           final_text: draft,
           converged: true,
+          rounds: round,
+        };
+      }
+
+      if (budgetExceeded(session, costLimit)) {
+        this.store.finalize(session.session_id, "max-rounds", "budget_exceeded");
+        return {
+          session: this.store.read(session.session_id),
+          final_text: draft,
+          converged: false,
           rounds: round,
         };
       }

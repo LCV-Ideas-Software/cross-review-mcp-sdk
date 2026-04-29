@@ -7,6 +7,12 @@ export type ReviewStatus = (typeof STATUSES)[number];
 export type Confidence = "verified" | "inferred" | "unknown";
 export type SessionOutcome = "converged" | "aborted" | "max-rounds";
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type DecisionQuality =
+  | "clean"
+  | "format_warning"
+  | "recovered"
+  | "needs_operator_review"
+  | "failed";
 
 export interface ModelCandidate {
   id: string;
@@ -64,6 +70,7 @@ export interface PeerResult {
   latency_ms: number;
   attempts: number;
   parser_warnings: string[];
+  decision_quality: DecisionQuality;
 }
 
 export interface GenerationResult {
@@ -93,6 +100,8 @@ export interface PeerFailure {
     | "network"
     | "timeout"
     | "schema"
+    | "unparseable_after_recovery"
+    | "budget_exceeded"
     | "unknown";
   message: string;
   retryable: boolean;
@@ -132,6 +141,16 @@ export interface EvidenceAttachment {
   content_type?: string;
 }
 
+export interface GenerationArtifact {
+  ts: string;
+  round: number;
+  label: string;
+  peer: PeerId;
+  path: string;
+  usage?: TokenUsage;
+  cost?: CostEstimate;
+}
+
 export interface OperatorEscalation {
   ts: string;
   reason: string;
@@ -168,6 +187,7 @@ export interface PeerProbeResult {
 }
 
 export interface RuntimeEvent {
+  seq?: number;
   type: string;
   ts?: string;
   session_id?: string;
@@ -175,6 +195,10 @@ export interface RuntimeEvent {
   peer?: PeerId;
   message?: string;
   data?: Record<string, unknown>;
+}
+
+export interface SessionEvent extends RuntimeEvent {
+  seq: number;
 }
 
 export interface SessionMeta {
@@ -192,6 +216,7 @@ export interface SessionMeta {
   convergence_health?: ConvergenceHealth;
   failed_attempts?: Array<PeerFailure & { round: number }>;
   evidence_files?: EvidenceAttachment[];
+  generation_files?: GenerationArtifact[];
   operator_escalations?: OperatorEscalation[];
   rounds: ReviewRound[];
   totals: {
@@ -223,6 +248,8 @@ export interface ConvergenceResult {
   not_ready_peers: PeerId[];
   needs_evidence_peers: PeerId[];
   rejected_peers: PeerId[];
+  decision_quality: Record<PeerId, DecisionQuality>;
+  blocking_details: string[];
 }
 
 export interface AppConfig {
@@ -236,6 +263,9 @@ export interface AppConfig {
     base_delay_ms: number;
     max_delay_ms: number;
     timeout_ms: number;
+  };
+  budget: {
+    max_session_cost_usd?: number;
   };
   models: Record<PeerId, string>;
   reasoning_effort: Partial<Record<PeerId, ReasoningEffort>>;

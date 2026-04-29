@@ -112,7 +112,12 @@ Then open `http://127.0.0.1:4588`.
 - `session_list`
 - `session_read`
 - `ask_peers`
+- `session_start_round`
 - `run_until_unanimous`
+- `session_start_unanimous`
+- `session_poll`
+- `session_events`
+- `session_report`
 - `session_check_convergence`
 - `session_attach_evidence`
 - `escalate_to_operator`
@@ -121,7 +126,13 @@ Then open `http://127.0.0.1:4588`.
 
 ## Session Observability
 
-Session metadata records in-flight rounds, convergence scope, convergence health, failed attempts, operator escalations and attached evidence files. Provider responses that report a different model from the model requested are recorded as `silent_model_downgrade` failures and block convergence.
+Session metadata records in-flight rounds, convergence scope, convergence health, failed attempts, operator escalations and attached evidence files. Each session can also produce `events.ndjson` and `session-report.md`, so long-running runs can be followed without waiting for a synchronous MCP call to return.
+
+`session_start_round` and `session_start_unanimous` return immediately with a `job_id` and `session_id`. Use `session_poll` for state, `session_events` for incremental events and `session_report` for the current Markdown report.
+
+Provider responses that report a different model from the model requested are recorded as `silent_model_downgrade` failures and block convergence. Responses that cannot be parsed after one automatic format-recovery retry are recorded as `unparseable_after_recovery` failures.
+
+When a provider rejects a prompt through moderation or safety filtering, the orchestrator records `prompt_flagged_by_moderation`, retries once with a compact sanitized review prompt, and marks successful retries with `decision_quality: recovered`. This is designed for verbose peer discussions that should be summarized, not replayed verbatim, in later prompts.
 
 Secret redaction is applied when prompts, responses, evidence and JSON metadata are written. The redactor covers known API-key and token formats; new credential formats should be added before public test fixtures are promoted.
 
@@ -132,9 +143,9 @@ Secret redaction is applied when prompts, responses, evidence and JSON metadata 
 - GitHub Pages via Actions artifact deployment.
 - Dependabot configured.
 - Dependabot automerge workflow prepared.
-- Pushes to `main` auto-create an organization-standard display tag such as `v02.00.02` from `package.json`; the tag then creates a normal GitHub Release and publishes `@lcv-ideas-software/cross-review-mcp-sdk` to npmjs.com and GitHub Packages. Prerelease package versions keep their prerelease label as an npm alias such as `alpha`; `latest` follows the newest published package version.
+- Pushes to `main` auto-create an organization-standard display tag such as `v02.00.03` from `package.json`; the tag then creates a normal GitHub Release and publishes `@lcv-ideas-software/cross-review-mcp-sdk` to npmjs.com and GitHub Packages. Prerelease package versions keep their prerelease label as an npm alias such as `alpha`; `latest` follows the newest published package version.
 - CodeQL must be enabled through GitHub Default Setup after repository creation. Advanced Setup requires prior authorization.
 
 ## Status
 
-Version `v02.00.02` (npm package `2.0.2-alpha.0`) is an SDK-only alpha implementation. It is intentionally separate from the existing CLI-based `cross-review-mcp` and does not modify that repository.
+Version `v02.00.03` (npm package `2.0.3-alpha.0`) is an SDK-only alpha implementation. It is intentionally separate from the existing CLI-based `cross-review-mcp` and does not modify that repository.

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { AppConfig, PeerId } from "./types.js";
 
-export const VERSION = "2.0.2-alpha.0";
+export const VERSION = "2.0.3-alpha.0";
 export const RELEASE_DATE = "2026-04-29";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -70,6 +70,11 @@ function intEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function numberEnv(name: string): number | undefined {
+  const parsed = Number.parseFloat(envValue(name) ?? "");
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
 function keyForPeer(peer: PeerId): string | undefined {
   switch (peer) {
     case "codex":
@@ -113,6 +118,9 @@ export function loadConfig(): AppConfig {
       max_delay_ms: intEnv("CROSS_REVIEW_SDK_RETRY_MAX_MS", 30000),
       timeout_ms: intEnv("CROSS_REVIEW_SDK_TIMEOUT_MS", 30 * 60 * 1000),
     },
+    budget: {
+      max_session_cost_usd: numberEnv("CROSS_REVIEW_SDK_MAX_SESSION_COST_USD"),
+    },
     models: {
       codex: envValue("CROSS_REVIEW_OPENAI_MODEL") || "gpt-5.5",
       claude: envValue("CROSS_REVIEW_ANTHROPIC_MODEL") || "claude-opus-4-7",
@@ -130,6 +138,20 @@ export function loadConfig(): AppConfig {
       gemini: keyForPeer("gemini"),
       deepseek: keyForPeer("deepseek"),
     },
-    cost_rates: {},
+    cost_rates: {
+      codex: costRate("CROSS_REVIEW_OPENAI"),
+      claude: costRate("CROSS_REVIEW_ANTHROPIC"),
+      gemini: costRate("CROSS_REVIEW_GEMINI"),
+      deepseek: costRate("CROSS_REVIEW_DEEPSEEK"),
+    },
   };
+}
+
+function costRate(
+  prefix: string,
+): { input_per_million: number; output_per_million: number } | undefined {
+  const input = numberEnv(`${prefix}_INPUT_USD_PER_MILLION`);
+  const output = numberEnv(`${prefix}_OUTPUT_USD_PER_MILLION`);
+  if (input == null || output == null) return undefined;
+  return { input_per_million: input, output_per_million: output };
 }

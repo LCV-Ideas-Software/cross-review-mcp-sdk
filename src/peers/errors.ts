@@ -23,7 +23,7 @@ export function classifyProviderError(
       message,
     );
   const moderation =
-    /\b(?:invalid_prompt|prompt[_\s-]?flagged|moderation|safety policy|usage policy|blocked by policy|could not be processed)\b/i.test(
+    /\b(?:invalid_prompt|prompt[_\s-]?flagged|moderation|moderated|safety policy|safety system|usage policy|responsibleaipolicyviolation|content[_\s-]?filter|blocked by policy|policy violation|could not be processed|input was rejected)\b/i.test(
       message,
     );
   const timeout = /\b(?:timeout|aborted|aborterror)\b/i.test(message);
@@ -54,7 +54,7 @@ export function classifyProviderError(
         ? "reformulate_and_retry"
         : undefined,
     reformulation_advice: moderation
-      ? "Rephrase the request in neutral technical language, reduce charged policy-sensitive terms, and keep the same engineering intent."
+      ? "Rephrase the request in neutral technical language, compact prior peer discussion, avoid quoting flagged text, and keep the same engineering intent."
       : undefined,
     attempts,
     latency_ms: Date.now() - started,

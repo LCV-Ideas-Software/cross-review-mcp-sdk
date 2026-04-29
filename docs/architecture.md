@@ -9,8 +9,10 @@ This API-only `cross-review-mcp-sdk` implementation is intentionally independent
 3. Peer adapters: call official provider SDKs/APIs.
 4. Model selection: queries model APIs and chooses the highest-capability documented model available to the key.
 5. Session store: writes durable JSON and Markdown artifacts under `data/sessions`.
-6. Observability: writes one NDJSON log per process under `data/logs`.
-7. Dashboard: local read-only HTTP UI for sessions and probes.
+6. Session events: writes durable `events.ndjson` streams per session for long-running work.
+7. Reports: writes `session-report.md` with convergence, failures, decision quality, costs and recent events.
+8. Observability: writes one NDJSON log per process under `data/logs`.
+9. Dashboard: local read-only HTTP UI for sessions, events, reports and probes.
 
 ## Real Execution Rule
 
@@ -27,9 +29,39 @@ calls, configure the host timeout to at least 300 seconds. A lower generic
 default, such as 60 seconds, can close the MCP request while the provider calls
 are still legitimately processing.
 
+For host environments that cannot keep a long MCP request open, use
+`session_start_round` or `session_start_unanimous`. Those tools create a
+background in-process job and return immediately. Use `session_poll` and
+`session_events` to follow progress without blocking the client request.
+
 ## Unanimity Rule
 
 A session converges only when the caller status is `READY`, every selected peer returns `READY`, and no peer failed or omitted a machine-readable status.
+
+Decision quality is tracked per peer:
+
+- `clean`: parsed status without warnings.
+- `format_warning`: parsed with non-blocking parser warnings.
+- `recovered`: recovered through format repair, moderation-safe retry or bounded sanitization.
+- `needs_operator_review`: no parseable status remains after recovery.
+- `failed`: provider or model-selection failure blocked the peer.
+
+`unparseable_after_recovery`, `prompt_flagged_by_moderation`,
+`silent_model_downgrade` and other rejected peer failures always block
+unanimity until resolved.
+
+## Moderation-Safe Prompting
+
+Prior peer history is summarized from structured fields instead of replaying
+raw model text. This keeps prompts smaller, reduces the chance that a verbose
+peer repeats policy-sensitive language into a later provider, and produces more
+useful audit trails.
+
+If a provider still rejects a prompt as moderated or safety-blocked, the
+orchestrator records the failure class and retries once with a compact,
+sanitized review prompt. This retry does not bypass provider policy: if the
+compact context is insufficient, the peer must return `NEEDS_EVIDENCE` or the
+session remains blocked for operator action.
 
 ## Model Discovery
 
