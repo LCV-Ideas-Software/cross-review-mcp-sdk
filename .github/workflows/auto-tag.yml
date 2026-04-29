@@ -1,0 +1,87 @@
+name: Auto-tag on version bump
+
+# Organization version display convention: public tags/releases use
+# vXX.XX.XX with zero-padded numeric segments. package.json keeps npm SemVer
+# shape and may include prerelease labels; the display tag is derived from the
+# numeric base version.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: auto-tag-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  auto-tag:
+    name: Create org-standard tag from package.json version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main with full history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Read package.json version and compute display tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?$ ]]; then
+            echo "::error::Invalid version shape in package.json: '$VERSION'. Expected X.Y.Z or X.Y.Z-prerelease."
+            exit 1
+          fi
+          BASE="$(echo "$VERSION" | sed -E 's/-.*$//')"
+          TAG="$(echo "$BASE" | awk -F. '{ printf "v%02d.%02d.%02d", $1, $2, $3 }')"
+          LEGACY_TAG="v${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "legacy_tag=$LEGACY_TAG" >> "$GITHUB_OUTPUT"
+          echo "Detected package version: $VERSION -> display tag: $TAG"
+
+      - name: Check if tag already exists
+        id: check
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          LEGACY_TAG: ${{ steps.version.outputs.legacy_tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already exists; skipping."
+          elif git ls-remote --exit-code --tags origin "refs/tags/${LEGACY_TAG}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Legacy SemVer tag ${LEGACY_TAG} already exists for this package version; skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} does not exist; it will be created."
+          fi
+
+      - name: Create and push tag
+        if: steps.check.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "${TAG}: auto-tagged from package.json on push to main"
+          git push origin "${TAG}"
+          echo "Created and pushed ${TAG}."
+
+      - name: Dispatch release workflow
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --ref main -f tag="${TAG}"
+          echo "Dispatched release.yml for ${TAG}; it will publish packages and create the GitHub Release."

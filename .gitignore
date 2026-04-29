@@ -1,0 +1,71 @@
+# Dependencies and build output
+node_modules/
+dist/
+artifacts/
+coverage/
+.turbo/
+.cache/
+
+# Runtime state - never commit sessions, logs, prompts, responses or secrets
+data/
+sessions/
+logs/
+.tmp/
+tmp/
+temp/
+cache/
+*.tmp
+*.tmp.*
+*.log
+*.pid
+*.ndjson
+
+# Secrets and local configuration
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+secrets.json
+credentials.json
+token.json
+vault.json
+vault*.json
+oauth_creds.json
+
+# AI transcripts and prompt dumps
+*.transcript.json
+*.transcript.ndjson
+*.prompt.json
+*.conversation.json
+*.conversation.ndjson
+agent-runs/
+cli-output/
+sessions/**/*.prompt.md
+sessions/**/*.response.json
+sessions/**/*.response.ndjson
+
+# Local AI memories must remain local
+AGENTS.local.md
+.ai/
+CLAUDE.md
+GEMINI.md
+memory/
+memories/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.bak
+*.swp
+*~
+~$*
+* (Conflicted Copy *).*
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json

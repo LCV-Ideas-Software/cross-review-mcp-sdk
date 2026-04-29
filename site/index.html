@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cross-review-mcp-sdk</title>
+    <style>
+      :root {
+        font-family: Inter, "Segoe UI", Arial, sans-serif;
+        color: #102033;
+        background: #f5f7fb;
+      }
+      body {
+        margin: 0;
+      }
+      main {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 44px 24px;
+      }
+      .hero {
+        background: #fff;
+        border: 1px solid #d8e1ee;
+        border-radius: 8px;
+        padding: 30px;
+        box-shadow: 0 12px 34px rgb(16 32 51 / 0.07);
+      }
+      img {
+        display: block;
+        max-width: min(520px, 100%);
+        height: auto;
+        margin: 0 auto 22px;
+      }
+      h1 {
+        margin: 0;
+        text-align: center;
+        font-size: clamp(30px, 5vw, 48px);
+      }
+      p {
+        font-size: 18px;
+        line-height: 1.65;
+      }
+      .badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: center;
+        margin-top: 18px;
+      }
+      .badge {
+        border-radius: 999px;
+        padding: 7px 12px;
+        font-weight: 800;
+        background: #102033;
+        color: #fff;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        justify-content: center;
+        margin-top: 24px;
+      }
+      a.button {
+        color: #fff;
+        background: #1f6feb;
+        border-radius: 8px;
+        padding: 12px 16px;
+        text-decoration: none;
+        font-weight: 900;
+      }
+      section {
+        margin-top: 28px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 14px;
+      }
+      article {
+        background: #fff;
+        border: 1px solid #d8e1ee;
+        border-radius: 8px;
+        padding: 18px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="hero">
+        <img src="./assets/lcv-ideas-software-logo.svg" alt="LCV Ideas & Software" />
+        <h1>cross-review-mcp-sdk</h1>
+        <p>
+          Servidor MCP SDK/API-only para revisao cruzada entre OpenAI, Anthropic, Google Gemini e
+          DeepSeek, usando SDKs oficiais e decisao por unanimidade.
+        </p>
+        <div class="badges">
+          <span class="badge">status alpha</span>
+          <span class="badge">sdk-only</span>
+          <span class="badge">Apache-2.0</span>
+          <span class="badge">CodeQL Default Setup</span>
+        </div>
+        <div class="actions">
+          <a class="button" href="https://github.com/sponsors/lcv-leo">Sponsor</a>
+          <a class="button" href="https://github.com/lcv-ideas-software">Organizacao</a>
+        </div>
+      </div>
+      <section>
+        <article>
+          <h2>Sem CLI</h2>
+          <p>Os peers sao acionados por API/SDK oficial. Nenhum terminal ou shell de agente.</p>
+        </article>
+        <article>
+          <h2>Modelos</h2>
+          <p>
+            O runtime consulta os modelos acessiveis pela chave e escolhe o mais capaz documentado.
+          </p>
+        </article>
+        <article>
+          <h2>Segredos</h2>
+          <p>API keys sao lidas apenas de variaveis de ambiente do Windows.</p>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>
