@@ -7,6 +7,18 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 ## [Unreleased]
 
+## [v02.00.02] - 2026-04-29
+
+### Changed
+
+- Normalized npmjs.com dist-tags so `latest` and the prerelease alias point to the newest published SDK package version.
+- Replaced the SDK Pages sponsor landing with the organization-standard SumUp support page.
+
+### Fixed
+
+- Sanitized dashboard HTTP 500 responses so internal exception messages are logged server-side but never returned to clients, resolving CodeQL `js/stack-trace-exposure`.
+- Bumped the SDK package/runtime version to `2.0.2-alpha.0`.
+
 ## [v02.00.01] - 2026-04-29
 
 ### Changed

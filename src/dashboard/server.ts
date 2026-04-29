@@ -3,6 +3,7 @@ import http from "node:http";
 import { loadConfig, VERSION } from "../core/config.js";
 import { CrossReviewOrchestrator } from "../core/orchestrator.js";
 import { EventLog } from "../observability/logger.js";
+import { safeErrorMessage } from "../security/redact.js";
 
 const config = loadConfig();
 const eventLog = new EventLog(config);
@@ -112,10 +113,9 @@ const server = http.createServer(async (request, response) => {
     }
     notFound(response);
   } catch (error) {
+    console.error(`dashboard_request_failed: ${safeErrorMessage(error)}`);
     response.writeHead(500, { "content-type": "application/json; charset=utf-8" });
-    response.end(
-      JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }),
-    );
+    response.end(JSON.stringify({ ok: false, error: "internal_server_error" }));
   }
 });
 
