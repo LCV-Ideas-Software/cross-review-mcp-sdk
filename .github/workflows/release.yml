@@ -142,14 +142,10 @@ jobs:
           set -euo pipefail
           npm dist-tag add "${PACKAGE_NAME}@${PACKAGE_VERSION}" "${DIST_TAG}" --registry https://registry.npmjs.org
           if [ "$DIST_TAG" != "latest" ]; then
-            LATEST="$(npm dist-tag ls "$PACKAGE_NAME" --registry https://registry.npmjs.org | awk '$1 == "latest:" { print $2 }' || true)"
-            if [ -n "$LATEST" ]; then
-              echo "Removing npmjs.com latest dist-tag (${LATEST}) because ${PACKAGE_VERSION} is a prerelease published as ${DIST_TAG}."
-              npm dist-tag rm "$PACKAGE_NAME" latest --registry https://registry.npmjs.org
-            else
-              echo "No npmjs.com latest dist-tag to remove."
-            fi
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} is available through the npmjs.com ${DIST_TAG} dist-tag."
+            echo "Leaving any registry-managed latest dist-tag untouched for prerelease-only package history."
           fi
+          npm dist-tag ls "$PACKAGE_NAME" --registry https://registry.npmjs.org
 
       - name: Setup Node.js 24 for GitHub Packages
         if: steps.meta.outputs.is_release == 'true'
