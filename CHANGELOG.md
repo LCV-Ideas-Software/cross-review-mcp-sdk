@@ -7,6 +7,22 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 ## [Unreleased]
 
+## [v02.02.00] - 2026-04-30
+
+### Added
+
+- Added real provider token streaming across OpenAI, Anthropic, Gemini and DeepSeek adapters.
+- Added count-based `peer.token.delta` and `peer.token.completed` session events so long-running reviews can expose live progress without waiting for full provider responses.
+- Added `CROSS_REVIEW_V2_STREAM_TOKENS` and `runtime_capabilities.token_streaming` as the public runtime controls for token streaming.
+- Added optional `CROSS_REVIEW_V2_STREAM_TEXT=1` for trusted local diagnostics that need redacted streamed text in session events.
+- Added a real API streaming smoke script that verifies all four providers emit token events without printing prompts, responses or API keys.
+
+### Changed
+
+- Kept token streaming enabled by default while preserving the existing final-result parsing and unanimity gate.
+- Kept token event text disabled by default so persisted `events.ndjson` progress events cannot leak sensitive strings split across provider chunks.
+- Documented the provider-native streaming APIs used by each peer adapter and corrected the local MCP path examples to the stable `cross-review-v2` folder name.
+
 ## [v02.01.01] - 2026-04-30
 
 ### Fixed

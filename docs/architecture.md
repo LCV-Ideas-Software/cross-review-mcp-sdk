@@ -10,9 +10,10 @@ This API-only `cross-review-v2` implementation is intentionally independent from
 4. Model selection: queries model APIs and chooses the highest-capability documented model available to the key.
 5. Session store: writes durable JSON and Markdown artifacts under `data/sessions`.
 6. Session events: writes durable `events.ndjson` streams per session for long-running work.
-7. Reports: writes `session-report.md` with convergence, failures, decision quality, costs and recent events.
-8. Observability: writes one NDJSON log per process under `data/logs`.
-9. Dashboard: local read-only HTTP UI for sessions, events, reports, probes and metrics.
+7. Token streaming: writes count-based `peer.token.delta` and `peer.token.completed` events when provider streaming is enabled.
+8. Reports: writes `session-report.md` with convergence, failures, decision quality, costs and recent events.
+9. Observability: writes one NDJSON log per process under `data/logs`.
+10. Dashboard: local read-only HTTP UI for sessions, events, reports, probes and metrics.
 
 ## Real Execution Rule
 
@@ -35,6 +36,30 @@ background in-process job and return immediately. Use `session_poll`,
 `session_events`, `session_metrics` and `session_report` to follow progress
 without blocking the client request. `session_cancel_job` requests cooperative
 cancellation and forwards `AbortSignal` to provider client calls where supported.
+
+## Streaming Model
+
+`CROSS_REVIEW_V2_STREAM_EVENTS` controls normal workflow events and defaults to
+enabled. `CROSS_REVIEW_V2_STREAM_TOKENS` controls provider token-progress events
+and also defaults to enabled. `runtime_capabilities.token_streaming` reflects
+the effective token-streaming setting, not a compile-time constant.
+
+When token streaming is active, adapters use provider-native streaming APIs:
+
+- OpenAI: Responses API streaming events, including `response.output_text.delta`.
+- Anthropic: Messages stream helper with text deltas and `finalMessage()`.
+- Gemini: `models.generateContentStream`.
+- DeepSeek: OpenAI-compatible chat completions with `stream: true`.
+
+The streaming path is not a separate fake progress channel. The same streamed
+text is accumulated and then parsed into the existing review or generation
+result.
+
+For safety, `peer.token.delta` events include character counts by default rather
+than provider text. `CROSS_REVIEW_V2_STREAM_TEXT=1` can include redacted text in
+trusted local diagnostics, but it is intentionally opt-in because providers may
+split sensitive strings across chunks. Raw thinking content is still not
+requested or persisted.
 
 ## Unanimity Rule
 

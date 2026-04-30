@@ -123,7 +123,7 @@ function startJob(
   return job;
 }
 
-function runtimeCapabilities(): RuntimeCapabilities {
+function runtimeCapabilities(runtime: Runtime): RuntimeCapabilities {
   return {
     stable_release: true,
     api_only: true,
@@ -133,7 +133,7 @@ function runtimeCapabilities(): RuntimeCapabilities {
     cancellation: true,
     restart_recovery: true,
     event_streaming: true,
-    token_streaming: false,
+    token_streaming: runtime.config.streaming.tokens,
     budget_preflight: true,
     model_fallback: true,
     metrics: true,
@@ -197,7 +197,7 @@ export async function main(): Promise<void> {
           api_only: true,
           cli_execution: false,
           stable_release: true,
-          capabilities: runtimeCapabilities(),
+          capabilities: runtimeCapabilities(runtime),
           tools: TOOL_NAMES,
           data_dir: runtime.config.data_dir,
           log_file: runtime.eventLog.path(),
@@ -234,7 +234,7 @@ export async function main(): Promise<void> {
           name: "cross-review-v2",
           version: VERSION,
           release_date: RELEASE_DATE,
-          capabilities: runtimeCapabilities(),
+          capabilities: runtimeCapabilities(runtime),
           tools: TOOL_NAMES,
         },
         response_format,

@@ -33,6 +33,8 @@ type DeepSeekThinkingExtension = {
 };
 type DeepSeekChatPayload = OpenAI.ChatCompletionCreateParamsNonStreaming &
   DeepSeekThinkingExtension;
+type DeepSeekChatStreamPayload = OpenAI.ChatCompletionCreateParamsStreaming &
+  DeepSeekThinkingExtension;
 
 function usageFromChat(usage: ChatUsage | null | undefined): TokenUsage | undefined {
   if (!usage) return undefined;
@@ -146,6 +148,44 @@ export class DeepSeekAdapter extends BasePeerAdapter implements PeerAdapter {
         };
         // DeepSeek's OpenAI-compatible API accepts the non-OpenAI `thinking` body field;
         // the OpenAI JS client forwards unknown body keys, and the real API smoke verifies it.
+        if (this.shouldStreamTokens(context)) {
+          const streamPayload: DeepSeekChatStreamPayload = {
+            ...payload,
+            stream: true,
+            stream_options: { include_usage: true },
+          };
+          const stream = await this.client().chat.completions.create(streamPayload, {
+            signal: context.signal,
+            timeout: this.config.retry.timeout_ms,
+          });
+          let text = "";
+          let usage: TokenUsage | undefined;
+          let modelReported: string | undefined;
+          let chunks = 0;
+          for await (const chunk of stream) {
+            chunks += 1;
+            modelReported = chunk.model ?? modelReported;
+            usage = usageFromChat(chunk.usage) ?? usage;
+            for (const choice of chunk.choices ?? []) {
+              const delta = choice.delta?.content ?? "";
+              text += delta;
+              this.emitTokenDelta(context, {
+                phase: "review",
+                delta,
+                source: "chat.completion.chunk.delta",
+              });
+            }
+          }
+          this.emitTokenCompleted(context, { phase: "review", chars: text.length });
+          return this.resultFromText({
+            text,
+            raw: { streamed: true, provider: this.provider, chunks, model: modelReported },
+            usage,
+            started,
+            attempts: attempt,
+            modelReported,
+          });
+        }
         const response = await this.client().chat.completions.create(payload, {
           signal: context.signal,
           timeout: this.config.retry.timeout_ms,
@@ -187,6 +227,44 @@ export class DeepSeekAdapter extends BasePeerAdapter implements PeerAdapter {
         };
         // DeepSeek's OpenAI-compatible API accepts the non-OpenAI `thinking` body field;
         // the OpenAI JS client forwards unknown body keys, and the real API smoke verifies it.
+        if (this.shouldStreamTokens(context)) {
+          const streamPayload: DeepSeekChatStreamPayload = {
+            ...payload,
+            stream: true,
+            stream_options: { include_usage: true },
+          };
+          const stream = await this.client().chat.completions.create(streamPayload, {
+            signal: context.signal,
+            timeout: this.config.retry.timeout_ms,
+          });
+          let text = "";
+          let usage: TokenUsage | undefined;
+          let modelReported: string | undefined;
+          let chunks = 0;
+          for await (const chunk of stream) {
+            chunks += 1;
+            modelReported = chunk.model ?? modelReported;
+            usage = usageFromChat(chunk.usage) ?? usage;
+            for (const choice of chunk.choices ?? []) {
+              const delta = choice.delta?.content ?? "";
+              text += delta;
+              this.emitTokenDelta(context, {
+                phase: "generation",
+                delta,
+                source: "chat.completion.chunk.delta",
+              });
+            }
+          }
+          this.emitTokenCompleted(context, { phase: "generation", chars: text.length });
+          return this.generationFromText({
+            text,
+            raw: { streamed: true, provider: this.provider, chunks, model: modelReported },
+            usage,
+            started,
+            attempts: attempt,
+            modelReported,
+          });
+        }
         const response = await this.client().chat.completions.create(payload, {
           signal: context.signal,
           timeout: this.config.retry.timeout_ms,

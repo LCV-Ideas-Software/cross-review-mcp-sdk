@@ -99,6 +99,30 @@ You can also set it as a Windows environment variable:
 
 Invalid, zero or negative values are ignored and the runtime falls back to `20000`.
 
+## Token Streaming
+
+Token streaming is enabled by default. Provider progress is written to the session event stream as `peer.token.delta` events with character counts, followed by one `peer.token.completed` event per peer call. This lets MCP hosts, dashboards and future UIs show long-running work as it happens instead of waiting for the complete provider response.
+
+```powershell
+[Environment]::SetEnvironmentVariable("CROSS_REVIEW_V2_STREAM_TOKENS", "1", "User")
+```
+
+Disable token streaming only if a host cannot consume frequent session events:
+
+```powershell
+[Environment]::SetEnvironmentVariable("CROSS_REVIEW_V2_STREAM_TOKENS", "0", "User")
+```
+
+For safety, streamed event text is not included by default. Enable it only for trusted local diagnostics:
+
+```powershell
+[Environment]::SetEnvironmentVariable("CROSS_REVIEW_V2_STREAM_TEXT", "1", "User")
+```
+
+When `CROSS_REVIEW_V2_STREAM_TEXT=1`, emitted text is passed through the same redaction layer used for session artifacts before it is persisted to `events.ndjson`. Even then, streaming text should be treated as diagnostic data, because providers can split sensitive strings across chunks. The default count-only mode avoids that class of leakage.
+
+`server_info` exposes the effective streaming configuration, and `runtime_capabilities.token_streaming` reflects the active `CROSS_REVIEW_V2_STREAM_TOKENS` setting. Streaming does not change the unanimity gate and does not persist raw chain-of-thought.
+
 ## Install
 
 ```powershell
@@ -119,7 +143,7 @@ Real peer calls can take longer than a generic MCP client's default 60-second re
 [mcp_servers.cross-review-v2]
 tool_timeout_sec = 300
 command = "node"
-args = ["C:/Users/leona/lcv-workspace/cross-review-mcp-v2/dist/src/mcp/server.js"]
+args = ["C:/Users/leona/lcv-workspace/cross-review-v2/dist/src/mcp/server.js"]
 env_vars = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"]
 env = { CROSS_REVIEW_V2_MAX_OUTPUT_TOKENS = "20000" }
 ```
@@ -132,6 +156,14 @@ For local no-cost smoke tests only:
 $env:CROSS_REVIEW_V2_STUB="1"
 npm test
 ```
+
+For a real provider streaming check with the four API keys, run:
+
+```powershell
+npm run api-streaming-smoke
+```
+
+The real smoke prints model names, status, usage and token-event counts only. It does not print prompts, provider text or API keys.
 
 ## Dashboard
 
@@ -189,6 +221,6 @@ Secret redaction is applied when prompts, responses, evidence and JSON metadata 
 
 ## Status
 
-Current version: `v02.01.01` (npm package `2.1.1`).
+Current version: `v02.02.00` (npm package `2.2.0`).
 
 Version `v02.01.00` (npm package `2.1.0`) is the first stable release of `cross-review-v2`.

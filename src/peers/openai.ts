@@ -26,6 +26,17 @@ type OpenAIUsage = {
   };
 };
 
+type OpenAIStreamEvent = {
+  type: string;
+  delta?: unknown;
+  response?: {
+    usage?: OpenAIUsage | null;
+    model?: string;
+    error?: { message?: string };
+  };
+  error?: { message?: string };
+};
+
 function usageFromOpenAI(usage: OpenAIUsage | null | undefined): TokenUsage | undefined {
   if (!usage) return undefined;
   return {
@@ -109,29 +120,71 @@ export class OpenAIAdapter extends BasePeerAdapter implements PeerAdapter {
           peer: this.id,
           message: `OpenAI review attempt ${attempt}`,
         });
-        const response = await this.client().responses.create(
-          {
-            model: this.model,
-            input: [
-              { role: "system", content: this.systemPrompt(context) },
-              { role: "user", content: `${userPrompt(prompt)}\n\n${statusInstruction()}` },
-            ],
-            text: {
-              format: {
-                type: "json_schema",
-                name: "cross_review_status",
-                strict: true,
-                schema: statusJsonSchema,
-              },
-              verbosity: "low",
+        const body = {
+          model: this.model,
+          input: [
+            { role: "system" as const, content: this.systemPrompt(context) },
+            {
+              role: "user" as const,
+              content: `${userPrompt(prompt)}\n\n${statusInstruction()}`,
             },
-            reasoning: { effort: openAIEffort(this.config.reasoning_effort.codex) },
-            store: false,
-            // OpenAI Responses API uses max_output_tokens, not Chat Completions max_tokens.
-            max_output_tokens: this.config.max_output_tokens,
+          ],
+          text: {
+            format: {
+              type: "json_schema" as const,
+              name: "cross_review_status",
+              strict: true,
+              schema: statusJsonSchema,
+            },
+            verbosity: "low" as const,
           },
-          { signal: context.signal, timeout: this.config.retry.timeout_ms },
-        );
+          reasoning: { effort: openAIEffort(this.config.reasoning_effort.codex) },
+          store: false,
+          // OpenAI Responses API uses max_output_tokens, not Chat Completions max_tokens.
+          max_output_tokens: this.config.max_output_tokens,
+        };
+        if (this.shouldStreamTokens(context)) {
+          let text = "";
+          let usage: TokenUsage | undefined;
+          let modelReported: string | undefined;
+          const stream = await this.client().responses.create(
+            { ...body, stream: true },
+            { signal: context.signal, timeout: this.config.retry.timeout_ms },
+          );
+          for await (const event of stream as AsyncIterable<OpenAIStreamEvent>) {
+            if (event.type === "response.output_text.delta") {
+              const delta = typeof event.delta === "string" ? event.delta : "";
+              text += delta;
+              this.emitTokenDelta(context, {
+                phase: "review",
+                delta,
+                source: "response.output_text.delta",
+              });
+            } else if (event.type === "response.completed") {
+              usage = usageFromOpenAI(event.response?.usage);
+              modelReported = event.response?.model;
+            } else if (event.type === "response.failed" || event.type === "response.error") {
+              const message =
+                event.type === "response.failed"
+                  ? event.response?.error?.message
+                  : event.error?.message;
+              throw new Error(message ?? "OpenAI streaming response failed.");
+            }
+          }
+          this.emitTokenCompleted(context, { phase: "review", chars: text.length });
+          return this.resultFromText({
+            text,
+            raw: { streamed: true, provider: this.provider, model: modelReported ?? this.model },
+            usage,
+            started,
+            attempts: attempt,
+            modelReported,
+          });
+        }
+        const response = await this.client().responses.create(body, {
+          signal: context.signal,
+          timeout: this.config.retry.timeout_ms,
+        });
         return this.resultFromText({
           text: textFromOpenAIResponse(response),
           raw: response,
@@ -158,19 +211,58 @@ export class OpenAIAdapter extends BasePeerAdapter implements PeerAdapter {
           peer: this.id,
           message: `OpenAI generation attempt ${attempt}`,
         });
-        const response = await this.client().responses.create(
-          {
-            model: this.model,
-            input: [
-              { role: "system", content: this.systemPrompt(context) },
-              { role: "user", content: userPrompt(prompt) },
-            ],
-            reasoning: { effort: openAIEffort(this.config.reasoning_effort.codex) },
-            store: false,
-            max_output_tokens: this.config.max_output_tokens,
-          },
-          { signal: context.signal, timeout: this.config.retry.timeout_ms },
-        );
+        const body = {
+          model: this.model,
+          input: [
+            { role: "system" as const, content: this.systemPrompt(context) },
+            { role: "user" as const, content: userPrompt(prompt) },
+          ],
+          reasoning: { effort: openAIEffort(this.config.reasoning_effort.codex) },
+          store: false,
+          max_output_tokens: this.config.max_output_tokens,
+        };
+        if (this.shouldStreamTokens(context)) {
+          let text = "";
+          let usage: TokenUsage | undefined;
+          let modelReported: string | undefined;
+          const stream = await this.client().responses.create(
+            { ...body, stream: true },
+            { signal: context.signal, timeout: this.config.retry.timeout_ms },
+          );
+          for await (const event of stream as AsyncIterable<OpenAIStreamEvent>) {
+            if (event.type === "response.output_text.delta") {
+              const delta = typeof event.delta === "string" ? event.delta : "";
+              text += delta;
+              this.emitTokenDelta(context, {
+                phase: "generation",
+                delta,
+                source: "response.output_text.delta",
+              });
+            } else if (event.type === "response.completed") {
+              usage = usageFromOpenAI(event.response?.usage);
+              modelReported = event.response?.model;
+            } else if (event.type === "response.failed" || event.type === "response.error") {
+              const message =
+                event.type === "response.failed"
+                  ? event.response?.error?.message
+                  : event.error?.message;
+              throw new Error(message ?? "OpenAI streaming response failed.");
+            }
+          }
+          this.emitTokenCompleted(context, { phase: "generation", chars: text.length });
+          return this.generationFromText({
+            text,
+            raw: { streamed: true, provider: this.provider, model: modelReported ?? this.model },
+            usage,
+            started,
+            attempts: attempt,
+            modelReported,
+          });
+        }
+        const response = await this.client().responses.create(body, {
+          signal: context.signal,
+          timeout: this.config.retry.timeout_ms,
+        });
         return this.generationFromText({
           text: textFromOpenAIResponse(response),
           raw: response,

@@ -9,6 +9,7 @@ import { parsePeerStatus } from "../src/core/status.js";
 import { PEERS } from "../src/core/types.js";
 import type { PeerResult } from "../src/core/types.js";
 import { selectFromCandidates } from "../src/peers/model-selection.js";
+import { StubAdapter } from "../src/peers/stub.js";
 import { redact } from "../src/security/redact.js";
 
 process.env.CROSS_REVIEW_V2_STUB = "1";
@@ -22,14 +23,34 @@ for (const provider of ["OPENAI", "ANTHROPIC", "GEMINI", "DEEPSEEK"]) {
 }
 
 const previousMaxOutputTokens = process.env.CROSS_REVIEW_V2_MAX_OUTPUT_TOKENS;
+const previousStreamTokens = process.env.CROSS_REVIEW_V2_STREAM_TOKENS;
+const previousStreamText = process.env.CROSS_REVIEW_V2_STREAM_TEXT;
 process.env.CROSS_REVIEW_V2_MAX_OUTPUT_TOKENS = "32000";
 assert.equal(loadConfig().max_output_tokens, 32_000);
 process.env.CROSS_REVIEW_V2_MAX_OUTPUT_TOKENS = "not-a-number";
 assert.equal(loadConfig().max_output_tokens, 20_000);
+process.env.CROSS_REVIEW_V2_STREAM_TOKENS = "0";
+assert.equal(loadConfig().streaming.tokens, false);
+process.env.CROSS_REVIEW_V2_STREAM_TOKENS = "1";
+assert.equal(loadConfig().streaming.tokens, true);
+process.env.CROSS_REVIEW_V2_STREAM_TEXT = "0";
+assert.equal(loadConfig().streaming.include_text, false);
+process.env.CROSS_REVIEW_V2_STREAM_TEXT = "1";
+assert.equal(loadConfig().streaming.include_text, true);
 if (previousMaxOutputTokens == null) {
   delete process.env.CROSS_REVIEW_V2_MAX_OUTPUT_TOKENS;
 } else {
   process.env.CROSS_REVIEW_V2_MAX_OUTPUT_TOKENS = previousMaxOutputTokens;
+}
+if (previousStreamTokens == null) {
+  delete process.env.CROSS_REVIEW_V2_STREAM_TOKENS;
+} else {
+  process.env.CROSS_REVIEW_V2_STREAM_TOKENS = previousStreamTokens;
+}
+if (previousStreamText == null) {
+  delete process.env.CROSS_REVIEW_V2_STREAM_TEXT;
+} else {
+  process.env.CROSS_REVIEW_V2_STREAM_TEXT = previousStreamText;
 }
 
 const config = loadConfig();
@@ -49,16 +70,21 @@ holder.orchestrator = orchestrator;
 
 const adapterExpectations: Array<{ file: string; field: string }> = [
   { file: "src/peers/openai.ts", field: "max_output_tokens: this.config.max_output_tokens" },
+  { file: "src/peers/openai.ts", field: "response.output_text.delta" },
   { file: "src/peers/anthropic.ts", field: "max_tokens: this.config.max_output_tokens" },
   { file: "src/peers/anthropic.ts", field: "thinking: anthropicThinking()" },
   { file: "src/peers/anthropic.ts", field: 'type: "adaptive"' },
+  { file: "src/peers/anthropic.ts", field: "messages.stream" },
   { file: "src/peers/gemini.ts", field: "maxOutputTokens: this.config.max_output_tokens" },
   { file: "src/peers/gemini.ts", field: "thinkingConfig: geminiThinkingConfig(this.model)" },
   { file: "src/peers/gemini.ts", field: "ThinkingLevel.HIGH" },
+  { file: "src/peers/gemini.ts", field: "generateContentStream" },
   { file: "src/peers/deepseek.ts", field: "max_tokens: this.config.max_output_tokens" },
   { file: "src/peers/deepseek.ts", field: 'type: "enabled"' },
   { file: "src/peers/deepseek.ts", field: "reasoning_effort:" },
   { file: "src/peers/deepseek.ts", field: "...deepSeekThinking(this.config)" },
+  { file: "src/peers/deepseek.ts", field: "stream: true" },
+  { file: "src/mcp/server.ts", field: "token_streaming: runtime.config.streaming.tokens" },
 ];
 
 for (const { file, field } of adapterExpectations) {
@@ -453,6 +479,34 @@ assert.equal(
   eventful.some((event) => event.type === "round.completed"),
   true,
 );
+assert.equal(
+  eventful.some((event) => event.type === "peer.token.delta"),
+  true,
+);
+assert.equal(
+  eventful.some((event) => event.type === "peer.token.completed"),
+  true,
+);
+const tokenDelta = eventful.find((event) => event.type === "peer.token.delta");
+assert.ok(tokenDelta);
+assert.equal(typeof tokenDelta.data?.chars, "number");
+assert.equal(Object.prototype.hasOwnProperty.call(tokenDelta.data ?? {}, "delta"), false);
+
+const directStreamEvents: Array<{ type: string; data?: Record<string, unknown> }> = [];
+const directStub = new StubAdapter(config, "codex");
+const directStubResult = await directStub.call("Verify direct streaming equivalence.", {
+  session_id: result.session.session_id,
+  round: 99,
+  task: "Verify direct streaming equivalence.",
+  stream_tokens: true,
+  emit(event) {
+    directStreamEvents.push(event);
+  },
+});
+const directStreamChars = directStreamEvents
+  .filter((event) => event.type === "peer.token.delta")
+  .reduce((total, event) => total + Number(event.data?.chars ?? 0), 0);
+assert.equal(directStreamChars, directStubResult.text.length);
 assert.deepEqual(
   eventful.map((event) => event.seq),
   eventful.map((_, index) => index + 1),

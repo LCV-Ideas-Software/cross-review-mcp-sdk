@@ -8,6 +8,7 @@ import type {
 } from "../core/types.js";
 import { estimateCost } from "../core/cost.js";
 import { decisionQualityFromStatus, parsePeerStatus } from "../core/status.js";
+import { redact } from "../security/redact.js";
 
 export abstract class BasePeerAdapter {
   abstract id: PeerId;
@@ -26,6 +27,55 @@ export abstract class BasePeerAdapter {
 
   private normalizeModelId(model: string): string {
     return model.trim().replace(/^models\//i, "");
+  }
+
+  protected shouldStreamTokens(context: PeerCallContext): boolean {
+    return Boolean(context.stream_tokens && this.config.streaming.tokens);
+  }
+
+  protected emitTokenDelta(
+    context: PeerCallContext,
+    params: { phase: "review" | "generation"; delta: string; source?: string },
+  ): void {
+    if (!this.shouldStreamTokens(context) || !params.delta) return;
+    const data: Record<string, unknown> = {
+      phase: params.phase,
+      provider: this.provider,
+      model: this.model,
+      source: params.source ?? "text",
+      chars: params.delta.length,
+    };
+    if (this.config.streaming.include_text) {
+      data.delta = redact(params.delta);
+    }
+    context.emit({
+      type: "peer.token.delta",
+      session_id: context.session_id,
+      round: context.round,
+      peer: this.id,
+      message: `${this.id} streamed ${params.delta.length} chars.`,
+      data,
+    });
+  }
+
+  protected emitTokenCompleted(
+    context: PeerCallContext,
+    params: { phase: "review" | "generation"; chars: number },
+  ): void {
+    if (!this.shouldStreamTokens(context)) return;
+    context.emit({
+      type: "peer.token.completed",
+      session_id: context.session_id,
+      round: context.round,
+      peer: this.id,
+      message: `${this.id} completed token streaming.`,
+      data: {
+        phase: params.phase,
+        provider: this.provider,
+        model: this.model,
+        chars: params.chars,
+      },
+    });
   }
 
   protected resultFromText(params: {

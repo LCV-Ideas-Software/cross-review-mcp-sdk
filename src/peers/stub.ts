@@ -30,6 +30,14 @@ export class StubAdapter extends BasePeerAdapter implements PeerAdapter {
     this.model = modelOverride ?? `stub-${id}`;
   }
 
+  private streamStubText(context: PeerCallContext, phase: "review" | "generation", text: string) {
+    if (!this.shouldStreamTokens(context)) return;
+    for (const delta of text.match(/.{1,32}/gs) ?? []) {
+      this.emitTokenDelta(context, { phase, delta, source: "stub.chunk" });
+    }
+    this.emitTokenCompleted(context, { phase, chars: text.length });
+  }
+
   async probe(): Promise<PeerProbeResult> {
     return {
       peer: this.id,
@@ -136,6 +144,7 @@ export class StubAdapter extends BasePeerAdapter implements PeerAdapter {
                       caller_requests: [],
                       follow_ups: [],
                     });
+    this.streamStubText(context, "review", text);
     return this.resultFromText({
       text,
       raw: { stub: true },
@@ -165,6 +174,7 @@ export class StubAdapter extends BasePeerAdapter implements PeerAdapter {
       "",
       prompt.slice(0, 1200),
     ].join("\n");
+    this.streamStubText(context, "generation", text);
     return this.generationFromText({
       text,
       raw: { stub: true },

@@ -114,25 +114,47 @@ export class AnthropicAdapter extends BasePeerAdapter implements PeerAdapter {
           peer: this.id,
           message: `Anthropic review attempt ${attempt}`,
         });
-        const message = await this.client().messages.create(
-          {
-            model: this.model,
-            max_tokens: this.config.max_output_tokens,
-            system: this.systemPrompt(context),
-            messages: [
-              { role: "user", content: `${userPrompt(prompt)}\n\n${statusInstruction()}` },
-            ],
-            thinking: anthropicThinking(),
-            output_config: {
-              effort: anthropicEffort(this.config.reasoning_effort.claude),
-              format: {
-                type: "json_schema",
-                schema: statusJsonSchema,
-              },
+        const body = {
+          model: this.model,
+          max_tokens: this.config.max_output_tokens,
+          system: this.systemPrompt(context),
+          messages: [
+            {
+              role: "user" as const,
+              content: `${userPrompt(prompt)}\n\n${statusInstruction()}`,
+            },
+          ],
+          thinking: anthropicThinking(),
+          output_config: {
+            effort: anthropicEffort(this.config.reasoning_effort.claude),
+            format: {
+              type: "json_schema" as const,
+              schema: statusJsonSchema,
             },
           },
-          { signal: context.signal },
-        );
+        };
+        if (this.shouldStreamTokens(context)) {
+          const stream = this.client().messages.stream(body, { signal: context.signal });
+          stream.on("text", (delta) =>
+            this.emitTokenDelta(context, {
+              phase: "review",
+              delta,
+              source: "content_block_delta.text_delta",
+            }),
+          );
+          const message = await stream.finalMessage();
+          const text = textFromAnthropicContent(message.content);
+          this.emitTokenCompleted(context, { phase: "review", chars: text.length });
+          return this.resultFromText({
+            text,
+            raw: { streamed: true, provider: this.provider, model: message.model },
+            usage: usageFromAnthropic(message.usage),
+            started,
+            attempts: attempt,
+            modelReported: message.model,
+          });
+        }
+        const message = await this.client().messages.create(body, { signal: context.signal });
         return this.resultFromText({
           text: textFromAnthropicContent(message.content),
           raw: message,
@@ -159,19 +181,38 @@ export class AnthropicAdapter extends BasePeerAdapter implements PeerAdapter {
           peer: this.id,
           message: `Anthropic generation attempt ${attempt}`,
         });
-        const message = await this.client().messages.create(
-          {
-            model: this.model,
-            max_tokens: this.config.max_output_tokens,
-            system: this.systemPrompt(context),
-            messages: [{ role: "user", content: userPrompt(prompt) }],
-            thinking: anthropicThinking(),
-            output_config: {
-              effort: anthropicEffort(this.config.reasoning_effort.claude),
-            },
+        const body = {
+          model: this.model,
+          max_tokens: this.config.max_output_tokens,
+          system: this.systemPrompt(context),
+          messages: [{ role: "user" as const, content: userPrompt(prompt) }],
+          thinking: anthropicThinking(),
+          output_config: {
+            effort: anthropicEffort(this.config.reasoning_effort.claude),
           },
-          { signal: context.signal },
-        );
+        };
+        if (this.shouldStreamTokens(context)) {
+          const stream = this.client().messages.stream(body, { signal: context.signal });
+          stream.on("text", (delta) =>
+            this.emitTokenDelta(context, {
+              phase: "generation",
+              delta,
+              source: "content_block_delta.text_delta",
+            }),
+          );
+          const message = await stream.finalMessage();
+          const text = textFromAnthropicContent(message.content);
+          this.emitTokenCompleted(context, { phase: "generation", chars: text.length });
+          return this.generationFromText({
+            text,
+            raw: { streamed: true, provider: this.provider, model: message.model },
+            usage: usageFromAnthropic(message.usage),
+            started,
+            attempts: attempt,
+            modelReported: message.model,
+          });
+        }
+        const message = await this.client().messages.create(body, { signal: context.signal });
         return this.generationFromText({
           text: textFromAnthropicContent(message.content),
           raw: message,

@@ -122,7 +122,7 @@ export class GeminiAdapter extends BasePeerAdapter implements PeerAdapter {
           peer: this.id,
           message: `Gemini review attempt ${attempt}`,
         });
-        const response = (await this.client().models.generateContent({
+        const params = {
           model: this.model,
           contents: `${this.systemPrompt(context)}\n\n${userPrompt(prompt)}\n\n${statusInstruction()}`,
           config: {
@@ -131,7 +131,32 @@ export class GeminiAdapter extends BasePeerAdapter implements PeerAdapter {
             maxOutputTokens: this.config.max_output_tokens,
             thinkingConfig: geminiThinkingConfig(this.model),
           },
-        })) as GeminiResponse;
+        };
+        if (this.shouldStreamTokens(context)) {
+          const stream = await this.client().models.generateContentStream(params);
+          let text = "";
+          let last: GeminiResponse | undefined;
+          for await (const chunk of stream as AsyncGenerator<GeminiResponse>) {
+            last = chunk;
+            const delta = chunk.text ?? "";
+            text += delta;
+            this.emitTokenDelta(context, {
+              phase: "review",
+              delta,
+              source: "generateContentStream.text",
+            });
+          }
+          this.emitTokenCompleted(context, { phase: "review", chars: text.length });
+          return this.resultFromText({
+            text: text || (last?.text ?? JSON.stringify(last ?? {})),
+            raw: { streamed: true, provider: this.provider, model: last?.modelVersion },
+            usage: usageFromGemini(last?.usageMetadata),
+            started,
+            attempts: attempt,
+            modelReported: last?.modelVersion,
+          });
+        }
+        const response = (await this.client().models.generateContent(params)) as GeminiResponse;
         return this.resultFromText({
           text: response.text ?? JSON.stringify(response),
           raw: response,
@@ -158,14 +183,39 @@ export class GeminiAdapter extends BasePeerAdapter implements PeerAdapter {
           peer: this.id,
           message: `Gemini generation attempt ${attempt}`,
         });
-        const response = (await this.client().models.generateContent({
+        const params = {
           model: this.model,
           contents: `${this.systemPrompt(context)}\n\n${userPrompt(prompt)}`,
           config: {
             maxOutputTokens: this.config.max_output_tokens,
             thinkingConfig: geminiThinkingConfig(this.model),
           },
-        })) as GeminiResponse;
+        };
+        if (this.shouldStreamTokens(context)) {
+          const stream = await this.client().models.generateContentStream(params);
+          let text = "";
+          let last: GeminiResponse | undefined;
+          for await (const chunk of stream as AsyncGenerator<GeminiResponse>) {
+            last = chunk;
+            const delta = chunk.text ?? "";
+            text += delta;
+            this.emitTokenDelta(context, {
+              phase: "generation",
+              delta,
+              source: "generateContentStream.text",
+            });
+          }
+          this.emitTokenCompleted(context, { phase: "generation", chars: text.length });
+          return this.generationFromText({
+            text: text || (last?.text ?? JSON.stringify(last ?? {})),
+            raw: { streamed: true, provider: this.provider, model: last?.modelVersion },
+            usage: usageFromGemini(last?.usageMetadata),
+            started,
+            attempts: attempt,
+            modelReported: last?.modelVersion,
+          });
+        }
+        const response = (await this.client().models.generateContent(params)) as GeminiResponse;
         return this.generationFromText({
           text: response.text ?? JSON.stringify(response),
           raw: response,

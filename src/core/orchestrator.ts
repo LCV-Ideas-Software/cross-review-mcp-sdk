@@ -732,6 +732,7 @@ export class CrossReviewOrchestrator {
           task: session.task,
           signal: input.signal,
           stream: this.config.streaming.events,
+          stream_tokens: this.config.streaming.tokens,
           emit: this.emit,
         }),
       ),
@@ -771,6 +772,7 @@ export class CrossReviewOrchestrator {
                 round: roundNumber,
                 task: session.task,
                 signal: input.signal,
+                stream_tokens: this.config.streaming.tokens,
                 emit: this.emit,
               },
             );
@@ -929,6 +931,7 @@ export class CrossReviewOrchestrator {
           task: input.task,
           signal: input.signal,
           stream: this.config.streaming.events,
+          stream_tokens: this.config.streaming.tokens,
           emit: this.emit,
         },
       );
@@ -984,6 +987,7 @@ export class CrossReviewOrchestrator {
             task: input.task,
             signal: input.signal,
             stream: this.config.streaming.events,
+            stream_tokens: this.config.streaming.tokens,
             emit: this.emit,
           },
         );

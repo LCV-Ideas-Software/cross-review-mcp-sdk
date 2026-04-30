@@ -194,7 +194,7 @@ export interface RuntimeCapabilities {
   cancellation: true;
   restart_recovery: true;
   event_streaming: true;
-  token_streaming: false;
+  token_streaming: boolean;
   budget_preflight: true;
   model_fallback: true;
   metrics: true;
@@ -215,6 +215,7 @@ export interface PeerCallContext {
   task: string;
   signal?: AbortSignal;
   stream?: boolean;
+  stream_tokens?: boolean;
   emit(event: RuntimeEvent): void;
 }
 
@@ -324,7 +325,8 @@ export interface AppConfig {
   max_output_tokens: number;
   streaming: {
     events: boolean;
-    tokens: false;
+    tokens: boolean;
+    include_text: boolean;
   };
   models: Record<PeerId, string>;
   fallback_models: Partial<Record<PeerId, string[]>>;

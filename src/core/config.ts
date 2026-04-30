@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { AppConfig, PeerId } from "./types.js";
 
-export const VERSION = "2.1.1";
+export const VERSION = "2.2.0";
 export const RELEASE_DATE = "2026-04-30";
 export const DEFAULT_MAX_OUTPUT_TOKENS = 20_000;
 
@@ -141,7 +141,8 @@ export function loadConfig(): AppConfig {
     max_output_tokens: intEnv("CROSS_REVIEW_V2_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
     streaming: {
       events: boolEnv("CROSS_REVIEW_V2_STREAM_EVENTS", true),
-      tokens: false,
+      tokens: boolEnv("CROSS_REVIEW_V2_STREAM_TOKENS", true),
+      include_text: boolEnv("CROSS_REVIEW_V2_STREAM_TEXT", false),
     },
     models: {
       codex: envValue("CROSS_REVIEW_OPENAI_MODEL") || "gpt-5.5",
