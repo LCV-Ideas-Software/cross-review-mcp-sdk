@@ -128,28 +128,6 @@ jobs:
           echo "::error::${PACKAGE_NAME}@${PACKAGE_VERSION} is not publicly visible on npmjs.com after publish."
           exit 1
 
-      - name: Normalize npmjs.com dist-tags
-        if: steps.meta.outputs.is_release == 'true'
-        env:
-          PACKAGE_NAME: ${{ steps.meta.outputs.name }}
-          PACKAGE_VERSION: ${{ steps.meta.outputs.version }}
-          DIST_TAG: ${{ steps.meta.outputs.dist_tag }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "NPM_TOKEN is not configured; trusted publishing handled npmjs.com publication, so optional dist-tag normalization is skipped."
-            npm dist-tag ls "$PACKAGE_NAME" --registry https://registry.npmjs.org || true
-            exit 0
-          fi
-          npm dist-tag add "${PACKAGE_NAME}@${PACKAGE_VERSION}" "${DIST_TAG}" --registry https://registry.npmjs.org
-          if [ "$DIST_TAG" != "latest" ]; then
-            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} is available through the npmjs.com ${DIST_TAG} dist-tag."
-            npm dist-tag add "${PACKAGE_NAME}@${PACKAGE_VERSION}" latest --registry https://registry.npmjs.org
-            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} is also the npmjs.com latest dist-tag because it is the newest published package version."
-          fi
-          npm dist-tag ls "$PACKAGE_NAME" --registry https://registry.npmjs.org
-
       - name: Setup Node.js 24 for GitHub Packages
         if: steps.meta.outputs.is_release == 'true'
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0

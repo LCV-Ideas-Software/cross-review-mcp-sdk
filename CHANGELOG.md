@@ -13,7 +13,7 @@ standard `v00.00.00`; npm package versions remain SemVer.
   - added GitHub environment `npm-production` with deployment restricted to `v*` tags;
   - attached the release workflow to `npm-production`;
   - removed the permanent `NPM_TOKEN` requirement from the npmjs.com publish step while preserving provenance.
-- Kept npmjs.com dist-tag normalization as an optional token-backed step, so releases still publish through trusted publishing when no `NPM_TOKEN` is configured.
+- Removed the legacy token-backed npmjs.com dist-tag normalization step; npmjs.com releases now rely on the trusted publishing `npm publish --tag` path only.
 
 ## [v02.02.00] - 2026-04-30
 
