@@ -6,21 +6,24 @@ import { GeminiAdapter } from "./gemini.js";
 import { OpenAIAdapter } from "./openai.js";
 import { StubAdapter } from "./stub.js";
 
-export function createAdapters(config: AppConfig): Record<PeerId, PeerAdapter> {
+export function createAdapters(
+  config: AppConfig,
+  modelOverrides: Partial<Record<PeerId, string>> = {},
+): Record<PeerId, PeerAdapter> {
   if (config.stub) {
     return {
-      codex: new StubAdapter(config, "codex"),
-      claude: new StubAdapter(config, "claude"),
-      gemini: new StubAdapter(config, "gemini"),
-      deepseek: new StubAdapter(config, "deepseek"),
+      codex: new StubAdapter(config, "codex", modelOverrides.codex),
+      claude: new StubAdapter(config, "claude", modelOverrides.claude),
+      gemini: new StubAdapter(config, "gemini", modelOverrides.gemini),
+      deepseek: new StubAdapter(config, "deepseek", modelOverrides.deepseek),
     };
   }
 
   return {
-    codex: new OpenAIAdapter(config),
-    claude: new AnthropicAdapter(config),
-    gemini: new GeminiAdapter(config),
-    deepseek: new DeepSeekAdapter(config),
+    codex: new OpenAIAdapter(config, modelOverrides.codex),
+    claude: new AnthropicAdapter(config, modelOverrides.claude),
+    gemini: new GeminiAdapter(config, modelOverrides.gemini),
+    deepseek: new DeepSeekAdapter(config, modelOverrides.deepseek),
   };
 }
 

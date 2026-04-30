@@ -22,6 +22,8 @@ export function classifyProviderError(
     /\b(?:401|403|unauthorized|forbidden|invalid api key|missing api key|expired api key|authentication failed|authentication required)\b/i.test(
       message,
     );
+  const cancelled =
+    /\b(?:aborterror|operation was aborted|call cancelled|session_cancelled)\b/i.test(message);
   const moderation =
     /\b(?:invalid_prompt|prompt[_\s-]?flagged|moderation|moderated|safety policy|safety system|usage policy|responsibleaipolicyviolation|content[_\s-]?filter|blocked by policy|policy violation|could not be processed|input was rejected)\b/i.test(
       message,
@@ -31,15 +33,17 @@ export function classifyProviderError(
 
   const failureClass = auth
     ? "auth"
-    : moderation
-      ? "prompt_flagged_by_moderation"
-      : rateLimited
-        ? "rate_limit"
-        : timeout
-          ? "timeout"
-          : network
-            ? "network"
-            : "provider_error";
+    : cancelled
+      ? "cancelled"
+      : moderation
+        ? "prompt_flagged_by_moderation"
+        : rateLimited
+          ? "rate_limit"
+          : timeout
+            ? "timeout"
+            : network
+              ? "network"
+              : "provider_error";
 
   return {
     peer,
@@ -47,7 +51,7 @@ export function classifyProviderError(
     model,
     failure_class: failureClass,
     message,
-    retryable: rateLimited || timeout || network,
+    retryable: !cancelled && (rateLimited || timeout || network),
     recovery_hint: rateLimited
       ? "wait_and_retry"
       : moderation

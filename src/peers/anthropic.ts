@@ -43,9 +43,9 @@ export class AnthropicAdapter extends BasePeerAdapter implements PeerAdapter {
   provider = "anthropic";
   model: string;
 
-  constructor(config: AppConfig) {
+  constructor(config: AppConfig, modelOverride?: string) {
     super(config);
-    this.model = config.models.claude;
+    this.model = modelOverride ?? config.models.claude;
   }
 
   private client(): Anthropic {

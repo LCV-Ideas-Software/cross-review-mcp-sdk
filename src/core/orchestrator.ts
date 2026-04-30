@@ -1,6 +1,8 @@
 import type {
   AppConfig,
+  ConvergenceResult,
   ConvergenceScope,
+  FallbackEvent,
   PeerAdapter,
   PeerFailure,
   PeerId,
@@ -28,6 +30,7 @@ export interface AskPeersInput {
   caller?: PeerId | "operator";
   caller_status?: ReviewStatus;
   peers?: PeerId[];
+  signal?: AbortSignal;
 }
 
 export interface AskPeersOutput {
@@ -45,6 +48,7 @@ export interface RunUntilUnanimousInput {
   max_rounds?: number;
   until_stopped?: boolean;
   max_cost_usd?: number;
+  signal?: AbortSignal;
 }
 
 export interface RunUntilUnanimousOutput {
@@ -76,17 +80,25 @@ function safePromptList(values: string[] | undefined, maxItems = 8): string {
     .join("; ");
 }
 
-function summarizePriorRounds(meta: SessionMeta): string {
+function limitBlock(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 80)}\n\n[Context compacted by prompt budget: ${value.length} chars -> ${maxLength} chars]`;
+}
+
+function summarizePriorRounds(meta: SessionMeta, config: AppConfig): string {
   if (!meta.rounds.length) return "No prior round.";
-  return meta.rounds
-    .slice(-5)
+  const summary = meta.rounds
+    .slice(-config.prompt.max_prior_rounds)
     .map((round) => {
       const peerLines = round.peers.map((peer) => {
         const summary = safePromptText(
           peer.structured?.summary ?? "No structured summary was returned.",
           700,
         );
-        const requests = safePromptList(peer.structured?.caller_requests, 6);
+        const requests = safePromptList(
+          peer.structured?.caller_requests,
+          config.prompt.max_peer_requests,
+        );
         return [
           `- ${peer.peer}: ${peer.status ?? "NO_STATUS"} (${peer.decision_quality ?? "unknown"})`,
           `  summary: ${summary}`,
@@ -107,9 +119,14 @@ function summarizePriorRounds(meta: SessionMeta): string {
       ].join("\n");
     })
     .join("\n\n");
+  return limitBlock(summary, config.prompt.max_history_chars);
 }
 
-function buildModerationSafeReviewPrompt(meta: SessionMeta, draft: string): string {
+function buildModerationSafeReviewPrompt(
+  meta: SessionMeta,
+  draft: string,
+  config: AppConfig,
+): string {
   return [
     "# Cross Review - Compact Moderation-Safe Review",
     "",
@@ -118,36 +135,36 @@ function buildModerationSafeReviewPrompt(meta: SessionMeta, draft: string): stri
     "If the compact context is insufficient to decide, return NEEDS_EVIDENCE with precise missing evidence.",
     "",
     "## Original Task (sanitized excerpt)",
-    safePromptText(meta.task, 6_000),
+    safePromptText(meta.task, Math.min(config.prompt.max_task_chars, 6_000)),
     "",
     "## Recent History (structured summary only)",
-    summarizePriorRounds(meta),
+    summarizePriorRounds(meta, config),
     "",
     "## Draft Or Solution Under Review (sanitized excerpt)",
-    safePromptText(draft, 16_000),
+    safePromptText(draft, Math.min(config.prompt.max_draft_chars, 16_000)),
     "",
     "Decide whether any blocking issue remains.",
   ].join("\n");
 }
 
-function buildReviewPrompt(meta: SessionMeta, draft: string): string {
+function buildReviewPrompt(meta: SessionMeta, draft: string, config: AppConfig): string {
   return [
     "# Cross Review - Review Round",
     "",
     "## Original Task",
-    meta.task,
+    safePromptText(meta.task, config.prompt.max_task_chars),
     "",
     "## Recent History",
-    summarizePriorRounds(meta),
+    summarizePriorRounds(meta, config),
     "",
     "## Draft Or Solution Under Review",
-    draft,
+    safePromptText(draft, config.prompt.max_draft_chars),
     "",
     "Review rigorously whether the draft or solution satisfies the task. Identify concrete blocking issues.",
   ].join("\n");
 }
 
-function buildRevisionPrompt(meta: SessionMeta, draft: string): string {
+function buildRevisionPrompt(meta: SessionMeta, draft: string, config: AppConfig): string {
   return [
     "# Cross Review - Revision For Convergence",
     "",
@@ -155,19 +172,19 @@ function buildRevisionPrompt(meta: SessionMeta, draft: string): string {
     "Do not ignore disagreements. Preserve what peers already accepted and fix what prevented unanimity.",
     "",
     "## Original Task",
-    meta.task,
+    safePromptText(meta.task, config.prompt.max_task_chars),
     "",
     "## Recent History",
-    summarizePriorRounds(meta),
+    summarizePriorRounds(meta, config),
     "",
     "## Previous Version",
-    draft,
+    safePromptText(draft, config.prompt.max_draft_chars),
     "",
     "Return only the complete revised version, without meeting notes or external commentary.",
   ].join("\n");
 }
 
-function buildInitialDraftPrompt(task: string): string {
+function buildInitialDraftPrompt(task: string, config: AppConfig): string {
   return [
     "# Cross Review - First Draft",
     "",
@@ -175,12 +192,16 @@ function buildInitialDraftPrompt(task: string): string {
     "The version will be submitted to unanimous peer review.",
     "",
     "## Task",
-    task,
+    safePromptText(task, config.prompt.max_task_chars),
   ].join("\n");
 }
 
-function buildFormatRecoveryPrompt(meta: SessionMeta, priorResponse: string): string {
-  const boundedTask = meta.task.length > 4_000 ? `${meta.task.slice(0, 3_997)}...` : meta.task;
+function buildFormatRecoveryPrompt(
+  meta: SessionMeta,
+  priorResponse: string,
+  config: AppConfig,
+): string {
+  const boundedTask = safePromptText(meta.task, Math.min(config.prompt.max_task_chars, 4_000));
   const boundedResponse =
     priorResponse.length > 20_000 ? `${priorResponse.slice(0, 19_997)}...` : priorResponse;
   return [
@@ -272,6 +293,74 @@ function budgetExceeded(session: SessionMeta, limit?: number): boolean {
   return limit != null && total != null && total > limit;
 }
 
+function estimatedPeerRoundCost(
+  config: AppConfig,
+  peers: PeerId[],
+  prompt: string,
+): number | undefined {
+  let total = 0;
+  for (const peer of peers) {
+    const rate = config.cost_rates[peer];
+    if (!rate) return undefined;
+    const inputTokens = Math.ceil(prompt.length / 4);
+    const outputTokens = 4096;
+    total += (inputTokens / 1_000_000) * rate.input_per_million;
+    total += (outputTokens / 1_000_000) * rate.output_per_million;
+  }
+  return total;
+}
+
+function budgetPreflightFailure(
+  peer: PeerId,
+  provider: string,
+  model: string,
+  message: string,
+): PeerFailure {
+  return {
+    peer,
+    provider,
+    model,
+    failure_class: "budget_preflight",
+    message,
+    retryable: false,
+    attempts: 0,
+    latency_ms: 0,
+  };
+}
+
+function cancelledConvergence(peers: PeerId[]): ConvergenceResult {
+  return {
+    converged: false,
+    reason: "session_cancelled",
+    ready_peers: [],
+    not_ready_peers: [],
+    needs_evidence_peers: [],
+    rejected_peers: peers,
+    decision_quality: Object.fromEntries(
+      peers.map((peer) => [peer, "failed"]),
+    ) as ConvergenceResult["decision_quality"],
+    blocking_details: ["Session was cancelled before all peers completed."],
+  };
+}
+
+function cancellationFailure(
+  peer: PeerId,
+  provider: string,
+  model: string,
+  reason: string,
+): PeerFailure {
+  return {
+    peer,
+    provider,
+    model,
+    failure_class: "cancelled",
+    message: reason,
+    retryable: false,
+    attempts: 0,
+    latency_ms: 0,
+  };
+}
+
 interface PeerCallOutcome {
   adapter: PeerAdapter;
   result?: PeerResult;
@@ -308,6 +397,42 @@ export class CrossReviewOrchestrator {
     return meta;
   }
 
+  private isCancelled(sessionId: string, signal?: AbortSignal): boolean {
+    return Boolean(signal?.aborted) || this.store.isCancellationRequested(sessionId);
+  }
+
+  private fallbackAdapters(adapter: PeerAdapter): PeerAdapter[] {
+    const models = this.config.fallback_models[adapter.id] ?? [];
+    return models
+      .filter((model) => model && model !== adapter.model)
+      .map((model) => createAdapters(this.config, { [adapter.id]: model })[adapter.id]);
+  }
+
+  private recordFallback(
+    sessionId: string,
+    adapter: PeerAdapter,
+    fallback: PeerAdapter,
+    reason: string,
+  ): FallbackEvent {
+    const event: FallbackEvent = {
+      peer: adapter.id,
+      provider: adapter.provider,
+      from_model: adapter.model,
+      to_model: fallback.model,
+      reason,
+      ts: now(),
+    };
+    this.store.appendFallbackEvent(sessionId, event);
+    this.emit({
+      type: "peer.fallback.started",
+      session_id: sessionId,
+      peer: adapter.id,
+      message: `Retrying ${adapter.id} with fallback model ${fallback.model}.`,
+      data: { from_model: adapter.model, to_model: fallback.model, reason },
+    });
+    return event;
+  }
+
   private async callPeerForReview(
     adapter: PeerAdapter,
     prompt: string,
@@ -315,6 +440,17 @@ export class CrossReviewOrchestrator {
     context: Parameters<PeerAdapter["call"]>[1],
   ): Promise<PeerCallOutcome> {
     const started = Date.now();
+    if (this.isCancelled(context.session_id, context.signal)) {
+      return {
+        adapter,
+        failure: cancellationFailure(
+          adapter.id,
+          adapter.provider,
+          adapter.model,
+          "Session cancellation was requested before peer call.",
+        ),
+      };
+    }
     try {
       return { adapter, result: await adapter.call(prompt, context) };
     } catch (error) {
@@ -327,6 +463,65 @@ export class CrossReviewOrchestrator {
         started,
       );
       if (failure.failure_class !== "prompt_flagged_by_moderation") {
+        if (failure.retryable) {
+          let fallbackWasTried = false;
+          let lastFallbackFailure: PeerFailure | undefined;
+          for (const fallback of this.fallbackAdapters(adapter)) {
+            fallbackWasTried = true;
+            const fallbackEvent = this.recordFallback(
+              context.session_id,
+              adapter,
+              fallback,
+              failure.failure_class,
+            );
+            try {
+              const fallbackResult = await fallback.call(prompt, context);
+              const parserWarnings = [
+                ...fallbackResult.parser_warnings,
+                `fallback_model_used:${adapter.model}->${fallback.model}`,
+              ];
+              return {
+                adapter: fallback,
+                result: {
+                  ...fallbackResult,
+                  attempts: fallbackResult.attempts + failure.attempts,
+                  parser_warnings: parserWarnings,
+                  decision_quality: decisionQualityFromStatus(
+                    fallbackResult.status,
+                    parserWarnings,
+                  ),
+                  fallback: fallbackEvent,
+                },
+              };
+            } catch (fallbackError) {
+              const fallbackFailure = classifyProviderError(
+                fallback.id,
+                fallback.provider,
+                fallback.model,
+                fallbackError,
+                this.config.retry.max_attempts,
+                started,
+              );
+              lastFallbackFailure = fallbackFailure;
+              if (!fallbackFailure.retryable) {
+                return { adapter: fallback, failure: fallbackFailure };
+              }
+            }
+          }
+          if (fallbackWasTried) {
+            return {
+              adapter,
+              failure: {
+                ...failure,
+                failure_class: "fallback_exhausted",
+                message: `Primary model failed with ${failure.failure_class}; fallback models were attempted and exhausted. Last fallback: ${
+                  lastFallbackFailure?.message ?? "unknown"
+                }`,
+                retryable: false,
+              },
+            };
+          }
+        }
         return { adapter, failure };
       }
 
@@ -400,8 +595,8 @@ export class CrossReviewOrchestrator {
       lead_peer: caller === "operator" ? undefined : caller,
     };
     const draftFile = this.store.saveDraft(session.session_id, roundNumber, input.draft);
-    const prompt = buildReviewPrompt(session, input.draft);
-    const moderationSafePrompt = buildModerationSafeReviewPrompt(session, input.draft);
+    const prompt = buildReviewPrompt(session, input.draft, this.config);
+    const moderationSafePrompt = buildModerationSafeReviewPrompt(session, input.draft, this.config);
     const promptFile = this.store.savePrompt(session.session_id, roundNumber, prompt);
     this.store.markInFlight(session.session_id, {
       round: roundNumber,
@@ -418,12 +613,94 @@ export class CrossReviewOrchestrator {
       data: { peers: selectedPeers },
     });
 
+    const roundPreflightLimit = this.config.budget.preflight_max_round_cost_usd;
+    const sessionPreflightLimit = budgetLimit(this.config);
+    const preflightEstimate = estimatedPeerRoundCost(this.config, selectedPeers, prompt);
+    const currentSessionCost = session.totals.cost.total_cost ?? 0;
+    const projectedSessionCost =
+      preflightEstimate == null ? undefined : currentSessionCost + preflightEstimate;
+    const message =
+      preflightEstimate == null && (roundPreflightLimit != null || sessionPreflightLimit != null)
+        ? "Budget preflight cannot estimate this round because one or more peers have no configured rate card."
+        : roundPreflightLimit != null &&
+            preflightEstimate != null &&
+            preflightEstimate > roundPreflightLimit
+          ? `Budget preflight blocked the round: estimated round cost $${preflightEstimate.toFixed(
+              6,
+            )} exceeds round limit $${roundPreflightLimit.toFixed(6)}.`
+          : sessionPreflightLimit != null &&
+              projectedSessionCost != null &&
+              projectedSessionCost > sessionPreflightLimit
+            ? `Budget preflight blocked the round: projected session cost $${projectedSessionCost.toFixed(
+                6,
+              )} exceeds session limit $${sessionPreflightLimit.toFixed(6)}.`
+            : undefined;
+    if (message) {
+      const rejected = selectAdapters(adapters, selectedPeers).map((adapter) =>
+        budgetPreflightFailure(adapter.id, adapter.provider, adapter.model, message),
+      );
+      for (const failure of rejected) {
+        this.store.savePeerFailure(session.session_id, roundNumber, failure);
+      }
+      const convergence = checkConvergence(selectedPeers, callerStatus, [], rejected);
+      const round = this.store.appendRound(session.session_id, {
+        caller_status: callerStatus,
+        draft_file: draftFile,
+        prompt_file: promptFile,
+        peers: [],
+        rejected,
+        convergence,
+        convergence_scope: convergenceScope,
+        started_at: startedAt,
+      });
+      const updated = this.store.finalize(session.session_id, "max-rounds", "budget_preflight");
+      this.emit({
+        type: "round.blocked.budget_preflight",
+        session_id: session.session_id,
+        round: roundNumber,
+        message,
+        data: {
+          estimated_round_cost_usd: preflightEstimate,
+          current_session_cost_usd: currentSessionCost,
+          projected_session_cost_usd: projectedSessionCost,
+          round_limit_usd: roundPreflightLimit,
+          session_limit_usd: sessionPreflightLimit,
+        },
+      });
+      return { session: updated, round, converged: false };
+    }
+
+    if (this.isCancelled(session.session_id, input.signal)) {
+      const rejected = selectAdapters(adapters, selectedPeers).map((adapter) =>
+        cancellationFailure(
+          adapter.id,
+          adapter.provider,
+          adapter.model,
+          "Session cancellation was requested before this round started.",
+        ),
+      );
+      const round = this.store.appendRound(session.session_id, {
+        caller_status: callerStatus,
+        draft_file: draftFile,
+        prompt_file: promptFile,
+        peers: [],
+        rejected,
+        convergence: cancelledConvergence(selectedPeers),
+        convergence_scope: convergenceScope,
+        started_at: startedAt,
+      });
+      const updated = this.store.markCancelled(session.session_id, "session_cancelled");
+      return { session: updated, round, converged: false };
+    }
+
     const settled = await Promise.all(
       selectAdapters(adapters, selectedPeers).map((adapter) =>
         this.callPeerForReview(adapter, prompt, moderationSafePrompt, {
           session_id: session.session_id,
           round: roundNumber,
           task: session.task,
+          signal: input.signal,
+          stream: this.config.streaming.events,
           emit: this.emit,
         }),
       ),
@@ -453,11 +730,12 @@ export class CrossReviewOrchestrator {
           });
           try {
             const recovered = await adapter.call(
-              buildFormatRecoveryPrompt(session, peerResult.text),
+              buildFormatRecoveryPrompt(session, peerResult.text, this.config),
               {
                 session_id: session.session_id,
                 round: roundNumber,
                 task: session.task,
+                signal: input.signal,
                 emit: this.emit,
               },
             );
@@ -576,18 +854,59 @@ export class CrossReviewOrchestrator {
     const reviewerPeers = selectedPeers.filter((peer) => peer !== leadPeer);
     let draft = input.initial_draft;
 
+    if (this.config.budget.require_rates_for_budget && costLimit != null) {
+      const missingRates = selectedPeers.filter((peer) => !this.config.cost_rates[peer]);
+      if (missingRates.length) {
+        this.store.finalize(session.session_id, "max-rounds", "budget_requires_rates");
+        this.emit({
+          type: "session.blocked.budget_requires_rates",
+          session_id: session.session_id,
+          message: "Budget limit requires configured rate cards for all selected peers.",
+          data: { missing_rates: missingRates },
+        });
+        return {
+          session: this.store.read(session.session_id),
+          final_text: draft,
+          converged: false,
+          rounds: 0,
+        };
+      }
+    }
+
     if (!draft) {
-      const generation = await adapters[leadPeer].generate(buildInitialDraftPrompt(input.task), {
-        session_id: session.session_id,
-        round: 0,
-        task: input.task,
-        emit: this.emit,
-      });
+      if (this.isCancelled(session.session_id, input.signal)) {
+        this.store.markCancelled(session.session_id, "session_cancelled");
+        return {
+          session: this.store.read(session.session_id),
+          converged: false,
+          rounds: 0,
+        };
+      }
+      const generation = await adapters[leadPeer].generate(
+        buildInitialDraftPrompt(input.task, this.config),
+        {
+          session_id: session.session_id,
+          round: 0,
+          task: input.task,
+          signal: input.signal,
+          stream: this.config.streaming.events,
+          emit: this.emit,
+        },
+      );
       this.store.saveGeneration(session.session_id, 0, generation, "initial-draft");
       draft = generation.text;
     }
 
     for (let round = 1; round <= maxRounds; round++) {
+      if (this.isCancelled(session.session_id, input.signal)) {
+        this.store.markCancelled(session.session_id, "session_cancelled");
+        return {
+          session: this.store.read(session.session_id),
+          final_text: draft,
+          converged: false,
+          rounds: round - 1,
+        };
+      }
       const result = await this.askPeers({
         session_id: session.session_id,
         task: input.task,
@@ -595,6 +914,7 @@ export class CrossReviewOrchestrator {
         caller: leadPeer,
         caller_status: "READY",
         peers: reviewerPeers.length ? reviewerPeers : selectedPeers,
+        signal: input.signal,
       });
       session = this.store.read(session.session_id);
       if (result.converged) {
@@ -617,12 +937,17 @@ export class CrossReviewOrchestrator {
       }
 
       if (round < maxRounds) {
-        const generation = await adapters[leadPeer].generate(buildRevisionPrompt(session, draft), {
-          session_id: session.session_id,
-          round,
-          task: input.task,
-          emit: this.emit,
-        });
+        const generation = await adapters[leadPeer].generate(
+          buildRevisionPrompt(session, draft, this.config),
+          {
+            session_id: session.session_id,
+            round,
+            task: input.task,
+            signal: input.signal,
+            stream: this.config.streaming.events,
+            emit: this.emit,
+          },
+        );
         this.store.saveGeneration(session.session_id, round, generation, "revision");
         draft = generation.text;
       }

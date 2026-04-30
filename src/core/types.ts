@@ -7,6 +7,11 @@ export type ReviewStatus = (typeof STATUSES)[number];
 export type Confidence = "verified" | "inferred" | "unknown";
 export type SessionOutcome = "converged" | "aborted" | "max-rounds";
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type SessionControlStatus =
+  | "running"
+  | "cancel_requested"
+  | "cancelled"
+  | "recovered_after_restart";
 export type DecisionQuality =
   | "clean"
   | "format_warning"
@@ -71,6 +76,7 @@ export interface PeerResult {
   attempts: number;
   parser_warnings: string[];
   decision_quality: DecisionQuality;
+  fallback?: FallbackEvent;
 }
 
 export interface GenerationResult {
@@ -85,6 +91,16 @@ export interface GenerationResult {
   cost?: CostEstimate;
   latency_ms: number;
   attempts: number;
+  fallback?: FallbackEvent;
+}
+
+export interface FallbackEvent {
+  peer: PeerId;
+  provider: string;
+  from_model: string;
+  to_model: string;
+  reason: string;
+  ts: string;
 }
 
 export interface PeerFailure {
@@ -102,6 +118,9 @@ export interface PeerFailure {
     | "schema"
     | "unparseable_after_recovery"
     | "budget_exceeded"
+    | "budget_preflight"
+    | "cancelled"
+    | "fallback_exhausted"
     | "unknown";
   message: string;
   retryable: boolean;
@@ -149,12 +168,36 @@ export interface GenerationArtifact {
   path: string;
   usage?: TokenUsage;
   cost?: CostEstimate;
+  latency_ms?: number;
 }
 
 export interface OperatorEscalation {
   ts: string;
   reason: string;
   severity: "info" | "warning" | "critical";
+}
+
+export interface SessionControl {
+  status: SessionControlStatus;
+  reason?: string;
+  job_id?: string;
+  requested_at?: string;
+  updated_at: string;
+}
+
+export interface RuntimeCapabilities {
+  stable_release: boolean;
+  api_only: boolean;
+  cli_execution: false;
+  durable_sessions: true;
+  async_jobs: true;
+  cancellation: true;
+  restart_recovery: true;
+  event_streaming: true;
+  token_streaming: false;
+  budget_preflight: true;
+  model_fallback: true;
+  metrics: true;
 }
 
 export interface PeerAdapter {
@@ -218,6 +261,8 @@ export interface SessionMeta {
   evidence_files?: EvidenceAttachment[];
   generation_files?: GenerationArtifact[];
   operator_escalations?: OperatorEscalation[];
+  control?: SessionControl;
+  fallback_events?: FallbackEvent[];
   rounds: ReviewRound[];
   totals: {
     usage: TokenUsage;
@@ -266,10 +311,49 @@ export interface AppConfig {
   };
   budget: {
     max_session_cost_usd?: number;
+    preflight_max_round_cost_usd?: number;
+    require_rates_for_budget: boolean;
+  };
+  prompt: {
+    max_task_chars: number;
+    max_history_chars: number;
+    max_draft_chars: number;
+    max_prior_rounds: number;
+    max_peer_requests: number;
+  };
+  streaming: {
+    events: boolean;
+    tokens: false;
   };
   models: Record<PeerId, string>;
+  fallback_models: Partial<Record<PeerId, string[]>>;
   reasoning_effort: Partial<Record<PeerId, ReasoningEffort>>;
   model_selection: Partial<Record<PeerId, ModelSelection>>;
   api_keys: Record<PeerId, string | undefined>;
   cost_rates: Partial<Record<PeerId, { input_per_million: number; output_per_million: number }>>;
+}
+
+export interface RuntimeMetrics {
+  generated_at: string;
+  scope: "all" | "session";
+  session_id?: string;
+  sessions: {
+    total: number;
+    converged: number;
+    aborted: number;
+    max_rounds: number;
+    unfinished: number;
+  };
+  rounds: number;
+  peer_results: Partial<Record<PeerId, number>>;
+  peer_failures: Partial<Record<PeerFailure["failure_class"], number>>;
+  decision_quality: Partial<Record<DecisionQuality, number>>;
+  moderation_recoveries: number;
+  fallback_events: number;
+  total_usage: TokenUsage;
+  total_cost: CostEstimate;
+  latency_ms: {
+    peer_average: number | null;
+    generation_average: number | null;
+  };
 }

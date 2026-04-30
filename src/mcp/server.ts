@@ -6,7 +6,7 @@ import { z } from "zod";
 import { RELEASE_DATE, VERSION, loadConfig } from "../core/config.js";
 import { CrossReviewOrchestrator } from "../core/orchestrator.js";
 import { PEERS } from "../core/types.js";
-import type { PeerId, RuntimeEvent } from "../core/types.js";
+import type { PeerId, RuntimeCapabilities, RuntimeEvent } from "../core/types.js";
 import { sessionReportMarkdown } from "../core/reports.js";
 import { EventLog } from "../observability/logger.js";
 import { safeErrorMessage } from "../security/redact.js";
@@ -27,7 +27,7 @@ type JobStatus = {
   job_id: string;
   kind: JobKind;
   session_id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   started_at: string;
   completed_at?: string;
   error?: string;
@@ -44,7 +44,13 @@ function createRuntime() {
   };
   const orchestrator = new CrossReviewOrchestrator(config, emit);
   holder.orchestrator = orchestrator;
-  return { config, eventLog, orchestrator, jobs: new Map<string, JobStatus>() };
+  return {
+    config,
+    eventLog,
+    orchestrator,
+    jobs: new Map<string, JobStatus>(),
+    controllers: new Map<string, AbortController>(),
+  };
 }
 
 type Runtime = ReturnType<typeof createRuntime>;
@@ -70,8 +76,9 @@ function startJob(
   runtime: Runtime,
   kind: JobKind,
   sessionId: string,
-  run: () => Promise<unknown>,
+  run: (signal: AbortSignal) => Promise<unknown>,
 ): JobStatus {
+  const controller = new AbortController();
   const job: JobStatus = {
     job_id: crypto.randomUUID(),
     kind,
@@ -80,21 +87,35 @@ function startJob(
     started_at: now(),
   };
   runtime.jobs.set(job.job_id, job);
-  void run()
+  runtime.controllers.set(job.job_id, controller);
+  void run(controller.signal)
     .then((result) => {
-      job.status = "completed";
+      job.status = controller.signal.aborted ? "cancelled" : "completed";
       job.completed_at = now();
       job.result_summary = summarizeJobResult(result);
+      runtime.controllers.delete(job.job_id);
+      if (controller.signal.aborted) {
+        try {
+          runtime.orchestrator.store.markCancelled(sessionId, "session_cancelled");
+        } catch {
+          // The job status remains visible even if a session write fails.
+        }
+      }
     })
     .catch((error) => {
-      job.status = "failed";
+      job.status = controller.signal.aborted ? "cancelled" : "failed";
       job.completed_at = now();
       job.error = safeErrorMessage(error);
+      runtime.controllers.delete(job.job_id);
       try {
-        runtime.orchestrator.store.escalateToOperator(sessionId, {
-          reason: `Background job failed: ${job.error}`,
-          severity: "critical",
-        });
+        if (controller.signal.aborted) {
+          runtime.orchestrator.store.markCancelled(sessionId, "session_cancelled");
+        } else {
+          runtime.orchestrator.store.escalateToOperator(sessionId, {
+            reason: `Background job failed: ${job.error}`,
+            severity: "critical",
+          });
+        }
       } catch {
         // Job state remains available even if the session cannot be updated.
       }
@@ -102,10 +123,51 @@ function startJob(
   return job;
 }
 
+function runtimeCapabilities(): RuntimeCapabilities {
+  return {
+    stable_release: true,
+    api_only: true,
+    cli_execution: false,
+    durable_sessions: true,
+    async_jobs: true,
+    cancellation: true,
+    restart_recovery: true,
+    event_streaming: true,
+    token_streaming: false,
+    budget_preflight: true,
+    model_fallback: true,
+    metrics: true,
+  };
+}
+
+const TOOL_NAMES = [
+  "server_info",
+  "runtime_capabilities",
+  "probe_peers",
+  "session_init",
+  "session_list",
+  "session_read",
+  "ask_peers",
+  "session_start_round",
+  "run_until_unanimous",
+  "session_start_unanimous",
+  "session_cancel_job",
+  "session_recover_interrupted",
+  "session_poll",
+  "session_events",
+  "session_metrics",
+  "session_report",
+  "session_check_convergence",
+  "session_attach_evidence",
+  "escalate_to_operator",
+  "session_sweep",
+  "session_finalize",
+] as const;
+
 export async function main(): Promise<void> {
   const runtime = createRuntime();
   const server = new McpServer({
-    name: "cross-review-mcp-sdk",
+    name: "cross-review-v2",
     version: VERSION,
   });
 
@@ -126,21 +188,53 @@ export async function main(): Promise<void> {
     async ({ response_format }) =>
       textResult(
         {
-          name: "cross-review-mcp-sdk",
+          name: "cross-review-v2",
           publisher: "LCV Ideas & Software",
           version: VERSION,
           release_date: RELEASE_DATE,
-          sponsors_url: "https://cross-review-mcp-sdk.lcv.app.br",
+          sponsors_url: "https://cross-review-v2.lcv.app.br",
           transport: "stdio",
-          sdk_only: true,
+          api_only: true,
           cli_execution: false,
+          stable_release: true,
+          capabilities: runtimeCapabilities(),
+          tools: TOOL_NAMES,
           data_dir: runtime.config.data_dir,
           log_file: runtime.eventLog.path(),
           stub: runtime.config.stub,
           retry_timeout_ms: runtime.config.retry.timeout_ms,
           budget: runtime.config.budget,
+          prompt: runtime.config.prompt,
+          streaming: runtime.config.streaming,
           codeql_policy: "Default Setup on GitHub; no advanced workflow committed.",
           secrets_policy: "API keys are read from Windows environment variables only.",
+        },
+        response_format,
+      ),
+  );
+
+  server.registerTool(
+    "runtime_capabilities",
+    {
+      title: "Runtime Capabilities",
+      description:
+        "Return the stable cross-review-v2 runtime capability contract and active tool list.",
+      inputSchema: z.object({ response_format: ResponseFormatSchema }).strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ response_format }) =>
+      textResult(
+        {
+          name: "cross-review-v2",
+          version: VERSION,
+          release_date: RELEASE_DATE,
+          capabilities: runtimeCapabilities(),
+          tools: TOOL_NAMES,
         },
         response_format,
       ),
@@ -151,7 +245,7 @@ export async function main(): Promise<void> {
     {
       title: "Probe Peers",
       description:
-        "Query official provider APIs/SDKs to discover available models for the current API keys, select the highest-capability documented model, and verify provider reachability.",
+        "Query official provider APIs to discover available models for the current API keys, select the highest-capability documented model, and verify provider reachability.",
       inputSchema: z.object({ response_format: ResponseFormatSchema }).strict(),
       annotations: {
         readOnlyHint: true,
@@ -231,7 +325,7 @@ export async function main(): Promise<void> {
     {
       title: "Ask Peers",
       description:
-        "Run a real API/SDK review round against selected peers. Runtime default uses real provider APIs; stubs run only when CROSS_REVIEW_SDK_STUB=1.",
+        "Run a real API review round against selected peers. Runtime default uses real provider APIs; stubs run only when CROSS_REVIEW_V2_STUB=1.",
       inputSchema: z
         .object({
           session_id: z.string().uuid().optional(),
@@ -290,8 +384,8 @@ export async function main(): Promise<void> {
       const session = input.session_id
         ? runtime.orchestrator.store.read(input.session_id)
         : await runtime.orchestrator.initSession(input.task, input.caller);
-      const job = startJob(runtime, "ask_peers", session.session_id, () =>
-        runtime.orchestrator.askPeers({ ...input, session_id: session.session_id }),
+      const job = startJob(runtime, "ask_peers", session.session_id, (signal) =>
+        runtime.orchestrator.askPeers({ ...input, session_id: session.session_id, signal }),
       );
       return textResult(
         {
@@ -372,8 +466,12 @@ export async function main(): Promise<void> {
       const session = input.session_id
         ? runtime.orchestrator.store.read(input.session_id)
         : await runtime.orchestrator.initSession(input.task, input.lead_peer);
-      const job = startJob(runtime, "run_until_unanimous", session.session_id, () =>
-        runtime.orchestrator.runUntilUnanimous({ ...input, session_id: session.session_id }),
+      const job = startJob(runtime, "run_until_unanimous", session.session_id, (signal) =>
+        runtime.orchestrator.runUntilUnanimous({
+          ...input,
+          session_id: session.session_id,
+          signal,
+        }),
       );
       return textResult(
         {
@@ -381,6 +479,82 @@ export async function main(): Promise<void> {
           job,
           poll_tool: "session_poll",
           events_tool: "session_events",
+        },
+        response_format,
+      );
+    },
+  );
+
+  server.registerTool(
+    "session_cancel_job",
+    {
+      title: "Cancel Session Job",
+      description:
+        "Request cancellation for running background jobs in a durable session. Provider calls receive AbortSignal where the provider client supports it.",
+      inputSchema: z
+        .object({
+          session_id: z.string().uuid(),
+          job_id: z.string().uuid().optional(),
+          reason: z.string().min(1).max(300).default("operator_requested"),
+          response_format: ResponseFormatSchema,
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ session_id, job_id, reason, response_format }) => {
+      const jobs = [...runtime.jobs.values()].filter(
+        (job) =>
+          job.session_id === session_id &&
+          job.status === "running" &&
+          (!job_id || job.job_id === job_id),
+      );
+      const meta = runtime.orchestrator.store.requestCancellation(session_id, reason, job_id);
+      for (const job of jobs) {
+        runtime.controllers.get(job.job_id)?.abort(reason);
+      }
+      if (!jobs.length) {
+        runtime.orchestrator.store.markCancelled(session_id, reason);
+      }
+      return textResult(
+        {
+          session_id,
+          requested: true,
+          matched_jobs: jobs,
+          control: meta.control,
+        },
+        response_format,
+      );
+    },
+  );
+
+  server.registerTool(
+    "session_recover_interrupted",
+    {
+      title: "Recover Interrupted Sessions",
+      description:
+        "Mark unfinished sessions with stale in-flight rounds as recovered after a MCP host restart so they can be resumed explicitly.",
+      inputSchema: z.object({ response_format: ResponseFormatSchema }).strict(),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ response_format }) => {
+      const active = new Set(
+        [...runtime.jobs.values()]
+          .filter((job) => job.status === "running")
+          .map((job) => job.session_id),
+      );
+      return textResult(
+        {
+          recovered: runtime.orchestrator.store.recoverInterruptedSessions(active),
         },
         response_format,
       );
@@ -418,10 +592,34 @@ export async function main(): Promise<void> {
           rounds: session.rounds.length,
           latest_round: session.rounds.at(-1) ?? null,
           jobs,
+          control: session.control,
         },
         response_format,
       );
     },
+  );
+
+  server.registerTool(
+    "session_metrics",
+    {
+      title: "Session Metrics",
+      description:
+        "Return aggregate observability metrics across all sessions, or only one session when session_id is provided.",
+      inputSchema: z
+        .object({
+          session_id: z.string().uuid().optional(),
+          response_format: ResponseFormatSchema,
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ session_id, response_format }) =>
+      textResult(runtime.orchestrator.store.metrics(session_id), response_format),
   );
 
   server.registerTool(
@@ -641,7 +839,7 @@ export async function main(): Promise<void> {
   );
 
   await server.connect(new StdioServerTransport());
-  console.error("cross-review-mcp-sdk running on stdio");
+  console.error("cross-review-v2 running on stdio");
 }
 
 main().catch((error) => {

@@ -1,12 +1,12 @@
 {
-  "name": "@lcv-ideas-software/cross-review-mcp-sdk",
-  "version": "2.0.4-alpha.0",
-  "description": "API/SDK-first MCP server for multi-model cross-review with unanimous convergence gates.",
+  "name": "@lcv-ideas-software/cross-review-v2",
+  "version": "2.1.0",
+  "description": "API-first MCP server for multi-model cross-review with unanimous convergence gates.",
   "type": "module",
   "main": "dist/src/mcp/server.js",
   "bin": {
-    "cross-review-mcp-sdk": "dist/src/mcp/server.js",
-    "cross-review-mcp-sdk-dashboard": "dist/src/dashboard/server.js"
+    "cross-review-v2": "dist/src/mcp/server.js",
+    "cross-review-v2-dashboard": "dist/src/dashboard/server.js"
   },
   "files": [
     "dist/",
@@ -58,12 +58,12 @@
   "author": "LCV Ideas & Software",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LCV-Ideas-Software/cross-review-mcp-sdk.git"
+    "url": "git+https://github.com/LCV-Ideas-Software/cross-review-v2.git"
   },
   "bugs": {
-    "url": "https://github.com/LCV-Ideas-Software/cross-review-mcp-sdk/issues"
+    "url": "https://github.com/LCV-Ideas-Software/cross-review-v2/issues"
   },
-  "homepage": "https://cross-review-mcp-sdk.lcv.app.br/",
+  "homepage": "https://cross-review-v2.lcv.app.br/",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -73,7 +73,6 @@
     "anthropic",
     "gemini",
     "deepseek",
-    "sdk",
     "api"
   ]
 }

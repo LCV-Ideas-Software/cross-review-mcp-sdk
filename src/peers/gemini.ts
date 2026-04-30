@@ -43,9 +43,9 @@ export class GeminiAdapter extends BasePeerAdapter implements PeerAdapter {
   provider = "google";
   model: string;
 
-  constructor(config: AppConfig) {
+  constructor(config: AppConfig, modelOverride?: string) {
     super(config);
-    this.model = config.models.gemini;
+    this.model = modelOverride ?? config.models.gemini;
   }
 
   private client(): GoogleGenAI {

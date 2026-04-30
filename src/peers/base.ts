@@ -91,7 +91,7 @@ export abstract class BasePeerAdapter {
 
   protected systemPrompt(context: PeerCallContext): string {
     return [
-      "You are a peer reviewer in cross-review-mcp-sdk.",
+      "You are a peer reviewer in cross-review-v2.",
       "Your job is to review the caller's work rigorously and independently.",
       "Do not rubber-stamp. Do not invent evidence.",
       "Unanimity is required: READY only when no blocking issue remains.",

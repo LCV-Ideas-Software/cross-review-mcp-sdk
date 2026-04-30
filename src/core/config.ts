@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { AppConfig, PeerId } from "./types.js";
 
-export const VERSION = "2.0.4-alpha.0";
+export const VERSION = "2.1.0";
 export const RELEASE_DATE = "2026-04-29";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -75,6 +75,13 @@ function numberEnv(name: string): number | undefined {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
+function listEnv(name: string): string[] {
+  return (envValue(name) ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 function keyForPeer(peer: PeerId): string | undefined {
   switch (peer) {
     case "codex":
@@ -101,7 +108,7 @@ function reasoningEffort(
 }
 
 export function loadConfig(): AppConfig {
-  const configuredDataDir = envValue("CROSS_REVIEW_SDK_DATA_DIR");
+  const configuredDataDir = envValue("CROSS_REVIEW_V2_DATA_DIR");
   const dataDir = configuredDataDir
     ? path.resolve(configuredDataDir)
     : path.join(PROJECT_ROOT, "data");
@@ -109,23 +116,42 @@ export function loadConfig(): AppConfig {
   return {
     version: VERSION,
     data_dir: dataDir,
-    log_level: envValue("CROSS_REVIEW_SDK_LOG_LEVEL") || "info",
-    stub: boolEnv("CROSS_REVIEW_SDK_STUB", false),
-    dashboard_port: intEnv("CROSS_REVIEW_SDK_DASHBOARD_PORT", 4588),
+    log_level: envValue("CROSS_REVIEW_V2_LOG_LEVEL") || "info",
+    stub: boolEnv("CROSS_REVIEW_V2_STUB", false),
+    dashboard_port: intEnv("CROSS_REVIEW_V2_DASHBOARD_PORT", 4588),
     retry: {
-      max_attempts: intEnv("CROSS_REVIEW_SDK_RETRY_ATTEMPTS", 3),
-      base_delay_ms: intEnv("CROSS_REVIEW_SDK_RETRY_BASE_MS", 1000),
-      max_delay_ms: intEnv("CROSS_REVIEW_SDK_RETRY_MAX_MS", 30000),
-      timeout_ms: intEnv("CROSS_REVIEW_SDK_TIMEOUT_MS", 30 * 60 * 1000),
+      max_attempts: intEnv("CROSS_REVIEW_V2_RETRY_ATTEMPTS", 3),
+      base_delay_ms: intEnv("CROSS_REVIEW_V2_RETRY_BASE_MS", 1000),
+      max_delay_ms: intEnv("CROSS_REVIEW_V2_RETRY_MAX_MS", 30000),
+      timeout_ms: intEnv("CROSS_REVIEW_V2_TIMEOUT_MS", 30 * 60 * 1000),
     },
     budget: {
-      max_session_cost_usd: numberEnv("CROSS_REVIEW_SDK_MAX_SESSION_COST_USD"),
+      max_session_cost_usd: numberEnv("CROSS_REVIEW_V2_MAX_SESSION_COST_USD"),
+      preflight_max_round_cost_usd: numberEnv("CROSS_REVIEW_V2_PREFLIGHT_MAX_ROUND_COST_USD"),
+      require_rates_for_budget: boolEnv("CROSS_REVIEW_V2_BUDGET_REQUIRE_RATES", false),
+    },
+    prompt: {
+      max_task_chars: intEnv("CROSS_REVIEW_V2_MAX_TASK_CHARS", 8_000),
+      max_history_chars: intEnv("CROSS_REVIEW_V2_MAX_HISTORY_CHARS", 20_000),
+      max_draft_chars: intEnv("CROSS_REVIEW_V2_MAX_DRAFT_CHARS", 40_000),
+      max_prior_rounds: intEnv("CROSS_REVIEW_V2_MAX_PRIOR_ROUNDS", 5),
+      max_peer_requests: intEnv("CROSS_REVIEW_V2_MAX_PEER_REQUESTS", 8),
+    },
+    streaming: {
+      events: boolEnv("CROSS_REVIEW_V2_STREAM_EVENTS", true),
+      tokens: false,
     },
     models: {
       codex: envValue("CROSS_REVIEW_OPENAI_MODEL") || "gpt-5.5",
       claude: envValue("CROSS_REVIEW_ANTHROPIC_MODEL") || "claude-opus-4-7",
       gemini: envValue("CROSS_REVIEW_GEMINI_MODEL") || "gemini-3.1-pro-preview",
       deepseek: envValue("CROSS_REVIEW_DEEPSEEK_MODEL") || "deepseek-v4-pro",
+    },
+    fallback_models: {
+      codex: listEnv("CROSS_REVIEW_OPENAI_FALLBACK_MODELS"),
+      claude: listEnv("CROSS_REVIEW_ANTHROPIC_FALLBACK_MODELS"),
+      gemini: listEnv("CROSS_REVIEW_GEMINI_FALLBACK_MODELS"),
+      deepseek: listEnv("CROSS_REVIEW_DEEPSEEK_FALLBACK_MODELS"),
     },
     reasoning_effort: {
       codex: reasoningEffort("CROSS_REVIEW_OPENAI_REASONING_EFFORT", "xhigh"),

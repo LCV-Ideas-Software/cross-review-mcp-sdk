@@ -4,7 +4,7 @@ Runtime calls are real provider API calls by default.
 
 ## Smoke Tests
 
-`npm test` uses `CROSS_REVIEW_SDK_STUB=1` and does not call provider APIs.
+`npm test` uses `CROSS_REVIEW_V2_STUB=1` and does not call provider APIs.
 
 ## Real Runs
 
@@ -33,7 +33,9 @@ hard-code provider prices because they can change without a code release.
 
 ## Optional Budget Guard
 
-`CROSS_REVIEW_SDK_MAX_SESSION_COST_USD` sets a default per-session budget guard.
+`CROSS_REVIEW_V2_MAX_SESSION_COST_USD` sets a default per-session budget guard.
+`CROSS_REVIEW_V2_PREFLIGHT_MAX_ROUND_COST_USD` can block a round before calls
+begin when the estimated cost exceeds the configured value.
 The `run_until_unanimous` and `session_start_unanimous` tools also accept
 `max_cost_usd` for a single run.
 

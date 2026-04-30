@@ -8,11 +8,11 @@ const transport = new StdioClientTransport({
   cwd: process.cwd(),
   env: {
     ...process.env,
-    CROSS_REVIEW_SDK_STUB: process.env.CROSS_REVIEW_SDK_STUB ?? "1",
+    CROSS_REVIEW_V2_STUB: process.env.CROSS_REVIEW_V2_STUB ?? "1",
   },
 });
 
-const client = new Client({ name: "cross-review-mcp-sdk-runtime-smoke", version: "0.0.0" });
+const client = new Client({ name: "cross-review-v2-runtime-smoke", version: "0.0.0" });
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
   const result = await client.callTool({ name, arguments: args }, undefined, {
@@ -30,7 +30,12 @@ async function pollUntilDone(sessionId: string): Promise<unknown> {
       session_id: sessionId,
       response_format: "json",
     })) as { jobs?: Array<{ status: string }> };
-    if (state.jobs?.some((job) => job.status === "completed" || job.status === "failed")) {
+    if (
+      state.jobs?.some(
+        (job) =>
+          job.status === "completed" || job.status === "failed" || job.status === "cancelled",
+      )
+    ) {
       return state;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -41,6 +46,7 @@ async function pollUntilDone(sessionId: string): Promise<unknown> {
 try {
   await client.connect(transport);
   const serverInfo = await callTool("server_info", { response_format: "json" });
+  const capabilities = await callTool("runtime_capabilities", { response_format: "json" });
   const roundStart = (await callTool("session_start_round", {
     task: "Runtime smoke: verify async review round.",
     draft: "Runtime smoke draft.",
@@ -64,17 +70,38 @@ try {
     response_format: "json",
   })) as { session_id: string };
   const unanimousState = await pollUntilDone(unanimousStart.session_id);
+  const cancelStart = (await callTool("session_start_round", {
+    task: "Runtime smoke: verify cancellation tool.",
+    draft: "FORCE_CANCEL_SLOW",
+    peers: ["codex"],
+    response_format: "json",
+  })) as { session_id: string; job: { job_id: string } };
+  const cancelResult = await callTool("session_cancel_job", {
+    session_id: cancelStart.session_id,
+    job_id: cancelStart.job.job_id,
+    reason: "runtime_smoke_cancel",
+    response_format: "json",
+  });
+  const cancelState = await pollUntilDone(cancelStart.session_id);
+  const metrics = await callTool("session_metrics", { response_format: "json" });
+  const recovery = await callTool("session_recover_interrupted", { response_format: "json" });
   console.log(
     JSON.stringify(
       {
         ok: true,
         serverInfo,
+        capabilities,
         round_session_id: roundStart.session_id,
         roundState,
         events,
         report,
         unanimous_session_id: unanimousStart.session_id,
         unanimousState,
+        cancel_session_id: cancelStart.session_id,
+        cancelResult,
+        cancelState,
+        metrics,
+        recovery,
       },
       null,
       2,

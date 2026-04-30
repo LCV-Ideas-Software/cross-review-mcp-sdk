@@ -44,7 +44,7 @@ jobs:
       - name: Verify
         run: npm test
         env:
-          CROSS_REVIEW_SDK_STUB: "1"
+          CROSS_REVIEW_V2_STUB: "1"
 
       - name: Resolve release metadata
         id: meta
@@ -223,6 +223,6 @@ jobs:
           fi
           gh release create "$TAG" artifacts/*.tgz \
             --repo "$GITHUB_REPOSITORY" \
-            --title "cross-review-mcp-sdk $TAG" \
+            --title "cross-review-v2 $TAG" \
             --notes "$NOTES" \
             --latest

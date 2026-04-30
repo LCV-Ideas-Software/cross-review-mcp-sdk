@@ -19,12 +19,10 @@ Required repository settings after the remote is created:
 13. Disable force-push and branch deletion on `main`.
 
 Package publishing is active after the repository is created and the `NPM_TOKEN` secret is
-configured. Pushes to `main` auto-create an organization-standard display tag such as `v02.00.00`
+configured. Pushes to `main` auto-create an organization-standard display tag such as `v02.01.00`
 from `package.json`; the tag then creates a normal GitHub Release and publishes
-`@lcv-ideas-software/cross-review-mcp-sdk` to npmjs.com and GitHub Packages. The SDK package is
-separate from the CLI package `@lcv-ideas-software/cross-review-mcp`.
-Prerelease versions publish with their prerelease label as the npm dist-tag, so alpha builds do not
-replace either stable `latest` channel.
+`@lcv-ideas-software/cross-review-v2` to npmjs.com and GitHub Packages. The API-first package is
+separate from the CLI package `@lcv-ideas-software/cross-review-v1`.
 
 CodeQL Advanced Setup is intentionally not committed. If Advanced Setup ever becomes necessary,
 it must be proposed with justification and approved before adding a workflow file.

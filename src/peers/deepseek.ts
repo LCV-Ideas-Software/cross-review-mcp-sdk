@@ -45,9 +45,9 @@ export class DeepSeekAdapter extends BasePeerAdapter implements PeerAdapter {
   provider = "deepseek";
   model: string;
 
-  constructor(config: AppConfig) {
+  constructor(config: AppConfig, modelOverride?: string) {
     super(config);
-    this.model = config.models.deepseek;
+    this.model = modelOverride ?? config.models.deepseek;
   }
 
   private client(): OpenAI {

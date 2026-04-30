@@ -38,4 +38,4 @@ jobs:
       - name: Smoke tests
         run: npm run smoke
         env:
-          CROSS_REVIEW_SDK_STUB: "1"
+          CROSS_REVIEW_V2_STUB: "1"

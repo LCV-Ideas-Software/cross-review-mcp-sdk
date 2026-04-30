@@ -1,27 +1,27 @@
 # Architecture
 
-This API-only `cross-review-mcp-sdk` implementation is intentionally independent from the current CLI-based `cross-review-mcp` project.
+This API-only `cross-review-v2` implementation is intentionally independent from the CLI-based `cross-review-v1` project.
 
 ## Runtime Layers
 
 1. MCP server: exposes workflow tools over stdio.
 2. Orchestrator: creates sessions, runs reviews, checks unanimity and asks the lead peer to revise.
-3. Peer adapters: call official provider SDKs/APIs.
+3. Peer adapters: call official provider APIs and client libraries.
 4. Model selection: queries model APIs and chooses the highest-capability documented model available to the key.
 5. Session store: writes durable JSON and Markdown artifacts under `data/sessions`.
 6. Session events: writes durable `events.ndjson` streams per session for long-running work.
 7. Reports: writes `session-report.md` with convergence, failures, decision quality, costs and recent events.
 8. Observability: writes one NDJSON log per process under `data/logs`.
-9. Dashboard: local read-only HTTP UI for sessions, events, reports and probes.
+9. Dashboard: local read-only HTTP UI for sessions, events, reports, probes and metrics.
 
 ## Real Execution Rule
 
-Runtime default is real API execution. Stubs are disabled unless `CROSS_REVIEW_SDK_STUB=1`.
+Runtime default is real API execution. Stubs are disabled unless `CROSS_REVIEW_V2_STUB=1`.
 
 ## Timeout Model
 
 Real API review rounds are intentionally long-running. The provider-side HTTP
-timeout is controlled by `CROSS_REVIEW_SDK_TIMEOUT_MS` and defaults to 30
+timeout is controlled by `CROSS_REVIEW_V2_TIMEOUT_MS` and defaults to 30
 minutes.
 
 MCP hosts also have their own client-to-server request timeout. For real peer
@@ -31,8 +31,10 @@ are still legitimately processing.
 
 For host environments that cannot keep a long MCP request open, use
 `session_start_round` or `session_start_unanimous`. Those tools create a
-background in-process job and return immediately. Use `session_poll` and
-`session_events` to follow progress without blocking the client request.
+background in-process job and return immediately. Use `session_poll`,
+`session_events`, `session_metrics` and `session_report` to follow progress
+without blocking the client request. `session_cancel_job` requests cooperative
+cancellation and forwards `AbortSignal` to provider client calls where supported.
 
 ## Unanimity Rule
 
@@ -73,3 +75,8 @@ Provider model APIs are queried at probe/session initialization:
 - DeepSeek: OpenAI-compatible `/models`.
 
 The selected model and selection evidence are persisted in the session capability snapshot.
+
+## Stable Rename
+
+Stable version `2.1.0` renamed the active product to `cross-review-v2`. The earlier development
+name remains only in historical changelog or memory notes.

@@ -9,10 +9,11 @@ import { parsePeerStatus } from "../src/core/status.js";
 import { PEERS } from "../src/core/types.js";
 import type { PeerResult } from "../src/core/types.js";
 
-process.env.CROSS_REVIEW_SDK_STUB = "1";
-process.env.CROSS_REVIEW_SDK_DATA_DIR =
-  process.env.CROSS_REVIEW_SDK_DATA_DIR ||
-  path.join(os.tmpdir(), `cross-review-mcp-sdk-smoke-${Date.now()}`);
+process.env.CROSS_REVIEW_V2_STUB = "1";
+process.env.CROSS_REVIEW_V2_DATA_DIR =
+  process.env.CROSS_REVIEW_V2_DATA_DIR ||
+  path.join(os.tmpdir(), `cross-review-v2-smoke-${Date.now()}`);
+process.env.CROSS_REVIEW_OPENAI_FALLBACK_MODELS ??= "stub-codex-fallback";
 for (const provider of ["OPENAI", "ANTHROPIC", "GEMINI", "DEEPSEEK"]) {
   process.env[`CROSS_REVIEW_${provider}_INPUT_USD_PER_MILLION`] ??= "1000";
   process.env[`CROSS_REVIEW_${provider}_OUTPUT_USD_PER_MILLION`] ??= "1000";
@@ -142,14 +143,14 @@ assert.equal(
 );
 assert.equal(orchestrator.store.read(stale.session_id).outcome, "aborted");
 
-process.env.CROSS_REVIEW_SDK_STUB_REPORTED_MODEL = "stub-downgraded";
+process.env.CROSS_REVIEW_V2_STUB_REPORTED_MODEL = "stub-downgraded";
 const mismatch = await orchestrator.askPeers({
   task: "Verify silent model downgrade handling.",
   draft: "This draft is intentionally simple.",
   caller: "operator",
   peers: ["codex"],
 });
-delete process.env.CROSS_REVIEW_SDK_STUB_REPORTED_MODEL;
+delete process.env.CROSS_REVIEW_V2_STUB_REPORTED_MODEL;
 assert.equal(mismatch.converged, false);
 assert.equal(mismatch.round.rejected.at(-1)?.failure_class, "silent_model_downgrade");
 assert.equal(mismatch.session.failed_attempts?.at(-1)?.failure_class, "silent_model_downgrade");
@@ -207,6 +208,21 @@ assert.equal(
 );
 assert.equal(moderationRetryFailed.round.rejected.at(-1)?.recovery_hint, "reformulate_and_retry");
 
+const fallbackRecovered = await orchestrator.askPeers({
+  task: "Verify model fallback handling.",
+  draft: "FORCE_NETWORK_FAIL",
+  caller: "operator",
+  peers: ["codex"],
+});
+assert.equal(fallbackRecovered.converged, true);
+assert.equal(fallbackRecovered.round.peers[0]?.fallback?.to_model, "stub-codex-fallback");
+assert.equal(
+  fallbackRecovered.round.peers[0]?.parser_warnings.some((warning) =>
+    warning.startsWith("fallback_model_used:"),
+  ),
+  true,
+);
+
 const budgetExceeded = await orchestrator.runUntilUnanimous({
   task: "Verify configured budget limit stops non-converged sessions.",
   initial_draft: "FORCE_NOT_READY",
@@ -220,6 +236,57 @@ assert.equal(budgetExceeded.session.outcome, "max-rounds");
 assert.equal(budgetExceeded.session.outcome_reason, "budget_exceeded");
 assert.equal(budgetExceeded.rounds, 1);
 
+const recoverySession = orchestrator.store.init("interrupted smoke session", "operator", probes);
+orchestrator.store.markInFlight(recoverySession.session_id, {
+  round: 1,
+  peers: ["codex"],
+  started_at: new Date().toISOString(),
+  scope: {
+    caller: "operator",
+    caller_status: "READY",
+    expected_peers: ["codex"],
+    reviewer_peers: ["codex"],
+  },
+});
+const recoveredInterrupted = orchestrator.store.recoverInterruptedSessions();
+assert.equal(
+  recoveredInterrupted.some((session) => session.session_id === recoverySession.session_id),
+  true,
+);
+assert.equal(
+  orchestrator.store.read(recoverySession.session_id).control?.status,
+  "recovered_after_restart",
+);
+
+const abortController = new AbortController();
+const cancellableRound = orchestrator.askPeers({
+  task: "Verify cooperative cancellation handling.",
+  draft: "FORCE_CANCEL_SLOW",
+  caller: "operator",
+  peers: ["codex"],
+  signal: abortController.signal,
+});
+setTimeout(() => abortController.abort("smoke_cancel"), 50);
+const cancelledRound = await cancellableRound;
+assert.equal(cancelledRound.converged, false);
+assert.equal(cancelledRound.round.rejected.at(-1)?.failure_class, "cancelled");
+
+process.env.CROSS_REVIEW_V2_PREFLIGHT_MAX_ROUND_COST_USD = "0.000001";
+process.env.CROSS_REVIEW_V2_DATA_DIR = path.join(
+  os.tmpdir(),
+  `cross-review-v2-preflight-smoke-${Date.now()}`,
+);
+const preflightOrchestrator = new CrossReviewOrchestrator(loadConfig());
+const preflightBlocked = await preflightOrchestrator.askPeers({
+  task: "Verify budget preflight.",
+  draft: "This draft should be blocked before a peer call.",
+  caller: "operator",
+  peers: ["codex"],
+});
+assert.equal(preflightBlocked.converged, false);
+assert.equal(preflightBlocked.round.rejected.at(-1)?.failure_class, "budget_preflight");
+assert.equal(preflightBlocked.session.outcome_reason, "budget_preflight");
+
 const eventful = orchestrator.store.readEvents(formatRecovered.session.session_id);
 assert.equal(
   eventful.some((event) => event.type === "round.completed"),
@@ -229,6 +296,11 @@ assert.deepEqual(
   eventful.map((event) => event.seq),
   eventful.map((_, index) => index + 1),
 );
+
+const metrics = orchestrator.store.metrics();
+assert.equal(metrics.fallback_events, 1);
+assert.equal((metrics.peer_failures.cancelled ?? 0) >= 1, true);
+assert.equal(Object.prototype.hasOwnProperty.call(metrics.decision_quality, "undefined"), false);
 
 console.log(
   JSON.stringify(

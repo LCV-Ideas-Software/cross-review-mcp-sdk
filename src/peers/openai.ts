@@ -45,9 +45,9 @@ export class OpenAIAdapter extends BasePeerAdapter implements PeerAdapter {
   provider = "openai";
   model: string;
 
-  constructor(config: AppConfig) {
+  constructor(config: AppConfig, modelOverride?: string) {
     super(config);
-    this.model = config.models.codex;
+    this.model = modelOverride ?? config.models.codex;
   }
 
   private client(): OpenAI {

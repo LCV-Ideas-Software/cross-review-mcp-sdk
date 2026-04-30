@@ -1,12 +1,12 @@
-# Cross Review MCP SDK - Format Recovery Findings
+# Cross Review v2 - Format Recovery Findings
 
 Date: 2026-04-28, America/Sao_Paulo
-Runtime: cross-review-mcp 2.0.0-alpha.2, SDK-only mode
+Runtime: pre-stable API-first runtime 2.0.0-alpha.2
 
 ## Context
 
-This report records real operational issues found while using the API/SDK-only
-cross-review runtime to review the published Maestro Editorial AI v0.3.11
+This report records real operational issues found while using the API-first cross-review runtime
+that later became `cross-review-v2`, while reviewing the published Maestro Editorial AI v0.3.11
 release.
 
 The reviewed release itself was published successfully:
@@ -72,7 +72,7 @@ Recommended fix:
 
 After full-peer rounds produced `codex`, `gemini`, and `deepseek` as `READY`,
 an isolated recovery call was sent only to `claude`. Claude returned `READY`,
-and the SDK marked that round as converged because `expected_peers=["claude"]`.
+and the runtime marked that round as converged because `expected_peers=["claude"]`.
 
 Observed session:
 
@@ -112,14 +112,14 @@ Impact:
 
 Recommended fix:
 
-- The SDK should inject a non-ambiguous response contract internally instead of
+- The runtime should inject a non-ambiguous response contract internally instead of
   requiring the caller to include a schema template in `draft`.
 - Use a separate transport-level response schema or provider-native structured
   output where available.
 - If a schema example must be included, wrap it in a clearly labeled
   `RESPONSE_FORMAT_INSTRUCTIONS` block and keep the reviewed artifact separate.
 
-### 4. The SDK needs automated per-peer format retries
+### 4. The runtime needs automated per-peer format retries
 
 The operator had to manually create shorter prompts and isolated calls to
 recover from parser failures.
@@ -192,7 +192,7 @@ For the Maestro v0.3.11 review, the substantive result was favorable:
 - Claude: READY after isolated format-recovery prompt
 
 However, because Claude's READY was obtained in an isolated recovery call, the
-SDK should not present this as a normal single-round quadrilateral convergence.
+The runtime should not present this as a normal single-round quadrilateral convergence.
 It should present it as recovered unanimity with explicit scope and audit trail.
 
 ## Implementation Update

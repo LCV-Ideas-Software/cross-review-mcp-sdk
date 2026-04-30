@@ -2,25 +2,29 @@
   <img src=".github/assets/lcv-ideas-software-logo.svg" alt="LCV Ideas & Software" width="520" />
 </p>
 
-# cross-review-mcp-sdk
+# cross-review-v2
 
-API/SDK-first MCP server for multi-model cross-review with unanimous convergence gates.
+API-first MCP server for multi-model cross-review with unanimous convergence gates.
 
-![status](https://img.shields.io/badge/status-alpha-orange)
-![sdk](https://img.shields.io/badge/runtime-SDK--only-blue)
+![status](https://img.shields.io/badge/status-stable-brightgreen)
+![runtime](https://img.shields.io/badge/runtime-API--only-blue)
 ![license](https://img.shields.io/badge/license-Apache--2.0-green)
 ![security](https://img.shields.io/badge/CodeQL-Default%20Setup-blue)
 
 ## What This Is
 
-`cross-review-mcp-sdk` is a new API-only implementation of the cross-review pattern. It does not execute Claude CLI, Codex CLI, Gemini CLI, DeepSeek CLI, PowerShell shells, or terminal sessions. The peers are called through official APIs and SDKs:
+`cross-review-v2` is the stable API-first implementation of the cross-review pattern. It does not execute Claude CLI, Codex CLI, Gemini CLI, DeepSeek CLI, PowerShell shells, or terminal sessions. The peers are called through provider APIs and official client libraries:
 
-- OpenAI SDK for the Codex/OpenAI peer.
-- Anthropic TypeScript SDK for Claude.
-- Google Gen AI SDK for Gemini.
-- OpenAI-compatible DeepSeek API via the official OpenAI SDK.
+- OpenAI client library for the Codex/OpenAI peer.
+- Anthropic TypeScript client library for Claude.
+- Google Gen AI client library for Gemini.
+- OpenAI-compatible DeepSeek API through the OpenAI client library.
 
-By default, runtime calls are real provider calls. Stubs exist only for smoke tests and CI when `CROSS_REVIEW_SDK_STUB=1`.
+Runtime calls are real provider calls by default. Stubs exist only for smoke tests and CI when `CROSS_REVIEW_V2_STUB=1`.
+
+## Rename Notice
+
+Starting with stable version `2.1.0`, this project is named `cross-review-v2`. The previous development name is retained only in historical changelog and memory notes.
 
 ## Secrets
 
@@ -58,6 +62,12 @@ Explicit env var overrides always win:
 [Environment]::SetEnvironmentVariable("CROSS_REVIEW_DEEPSEEK_MODEL", "deepseek-v4-pro", "User")
 ```
 
+Optional fallback model lists are comma-separated:
+
+```powershell
+[Environment]::SetEnvironmentVariable("CROSS_REVIEW_OPENAI_FALLBACK_MODELS", "gpt-5.4,gpt-5.3", "User")
+```
+
 Each probe records the selected model, candidates returned by the API, source URL, confidence and selection reason.
 
 ## Install
@@ -74,25 +84,22 @@ npm run build
 node dist/src/mcp/server.js
 ```
 
-Real peer calls can easily take longer than a generic MCP client's default
-60-second request timeout. Hosts and test clients should use at least 300s for
-MCP tool calls:
+Real peer calls can take longer than a generic MCP client's default 60-second request timeout. Hosts and test clients should use at least 300s for MCP tool calls:
 
 ```toml
-[mcp_servers.cross-review-mcp-sdk]
+[mcp_servers.cross-review-v2]
 tool_timeout_sec = 300
 command = "node"
-args = ["C:/Users/leona/lcv-workspace/cross-review-mcp-sdk/dist/src/mcp/server.js"]
+args = ["C:/Users/leona/lcv-workspace/cross-review-mcp-v2/dist/src/mcp/server.js"]
 env_vars = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"]
 ```
 
-Provider HTTP calls use `CROSS_REVIEW_SDK_TIMEOUT_MS`, which defaults to 30
-minutes. The 300s setting above is for the MCP client-to-server request.
+Provider HTTP calls use `CROSS_REVIEW_V2_TIMEOUT_MS`, which defaults to 30 minutes. The 300s setting above is for the MCP client-to-server request.
 
 For local no-cost smoke tests only:
 
 ```powershell
-$env:CROSS_REVIEW_SDK_STUB="1"
+$env:CROSS_REVIEW_V2_STUB="1"
 npm test
 ```
 
@@ -107,6 +114,7 @@ Then open `http://127.0.0.1:4588`.
 ## MCP Tools
 
 - `server_info`
+- `runtime_capabilities`
 - `probe_peers`
 - `session_init`
 - `session_list`
@@ -115,8 +123,11 @@ Then open `http://127.0.0.1:4588`.
 - `session_start_round`
 - `run_until_unanimous`
 - `session_start_unanimous`
+- `session_cancel_job`
+- `session_recover_interrupted`
 - `session_poll`
 - `session_events`
+- `session_metrics`
 - `session_report`
 - `session_check_convergence`
 - `session_attach_evidence`
@@ -126,9 +137,9 @@ Then open `http://127.0.0.1:4588`.
 
 ## Session Observability
 
-Session metadata records in-flight rounds, convergence scope, convergence health, failed attempts, operator escalations and attached evidence files. Each session can also produce `events.ndjson` and `session-report.md`, so long-running runs can be followed without waiting for a synchronous MCP call to return.
+Session metadata records in-flight rounds, convergence scope, convergence health, failed attempts, operator escalations, fallback events and attached evidence files. Each session can also produce `events.ndjson`, aggregate metrics and `session-report.md`, so long-running runs can be followed without waiting for a synchronous MCP call to return.
 
-`session_start_round` and `session_start_unanimous` return immediately with a `job_id` and `session_id`. Use `session_poll` for state, `session_events` for incremental events and `session_report` for the current Markdown report.
+`session_start_round` and `session_start_unanimous` return immediately with a `job_id` and `session_id`. Use `session_poll` for state, `session_events` for incremental events, `session_metrics` for cost/latency/failure summaries, `session_cancel_job` for cooperative cancellation and `session_report` for the current Markdown report.
 
 Provider responses that report a different model from the model requested are recorded as `silent_model_downgrade` failures and block convergence. Responses that cannot be parsed after one automatic format-recovery retry are recorded as `unparseable_after_recovery` failures.
 
@@ -143,9 +154,9 @@ Secret redaction is applied when prompts, responses, evidence and JSON metadata 
 - GitHub Pages via Actions artifact deployment.
 - Dependabot configured.
 - Dependabot automerge workflow prepared.
-- Pushes to `main` auto-create an organization-standard display tag such as `v02.00.04` from `package.json`; the tag then creates a normal GitHub Release and publishes `@lcv-ideas-software/cross-review-mcp-sdk` to npmjs.com and GitHub Packages. Prerelease package versions keep their prerelease label as an npm alias such as `alpha`; `latest` follows the newest published package version.
+- Pushes to `main` auto-create an organization-standard display tag such as `v02.01.00` from `package.json`; the tag then creates a normal GitHub Release and publishes `@lcv-ideas-software/cross-review-v2` to npmjs.com and GitHub Packages.
 - CodeQL must be enabled through GitHub Default Setup after repository creation. Advanced Setup requires prior authorization.
 
 ## Status
 
-Version `v02.00.04` (npm package `2.0.4-alpha.0`) is an SDK-only alpha implementation. It is intentionally separate from the existing CLI-based `cross-review-mcp` and does not modify that repository.
+Version `v02.01.00` (npm package `2.1.0`) is the first stable release of `cross-review-v2`.

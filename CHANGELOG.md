@@ -7,6 +7,29 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 ## [Unreleased]
 
+## [v02.01.00] - 2026-04-29
+
+### Added
+
+- Promoted the API-first implementation to the first stable release as `cross-review-v2`.
+- Added cooperative background-job cancellation with `session_cancel_job`, durable cancellation metadata and provider `AbortSignal` forwarding where supported.
+- Added `session_recover_interrupted` for restart recovery of stale in-flight sessions.
+- Added `session_metrics` and `runtime_capabilities` tools for observability and host/tool discovery.
+- Added configurable prompt compaction limits for verbose peer history and moderation-sensitive review rounds.
+- Added conservative budget preflight checks before expensive review rounds when limits and rate cards are configured.
+- Added per-peer fallback model lists with auditable fallback events.
+
+### Changed
+
+- Renamed active runtime, package, bin commands, public docs, Pages metadata and MCP server identity from the development name used before this release to `cross-review-v2`.
+- Changed status badges and release documentation from alpha/prerelease to stable SemVer.
+- Expanded session reports and dashboard contracts to include cancellation, recovery, metrics and fallback state.
+
+### Fixed
+
+- Prevented long-running background work from becoming opaque by exposing durable metrics, events, cancellation status and restart-recovery state.
+- Reduced moderation failures caused by overly verbose peer history through bounded prompt summaries.
+
 ## [v02.00.04] - 2026-04-29
 
 ### Fixed
