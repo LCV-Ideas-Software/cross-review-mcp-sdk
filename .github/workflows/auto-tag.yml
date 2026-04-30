@@ -6,7 +6,7 @@ name: Auto-tag on version bump
 # numeric base version.
 #
 # GitHub does not start a second workflow from a tag push created with
-# GITHUB_TOKEN, so this workflow explicitly dispatches release.yml on the tag
+# GITHUB_TOKEN, so this workflow explicitly dispatches publish.yml on the tag
 # ref. The npm-production environment allows v* tag refs, not main.
 
 on:
@@ -80,7 +80,7 @@ jobs:
           git push origin "${TAG}"
           echo "Created and pushed lightweight tag ${TAG}."
 
-      - name: Dispatch release workflow
+      - name: Dispatch publish workflow
         if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -100,15 +100,15 @@ jobs:
                 echo "::warning::Tag ${TAG} is annotated but peels to ${expected_sha}; proceeding for compatibility. New auto-created tags are lightweight."
                 break
               fi
-              echo "::error::Tag ${TAG} points to ${tag_sha} (peeled: ${peeled_sha:-none}), expected ${expected_sha}; refusing to dispatch release.yml."
+              echo "::error::Tag ${TAG} points to ${tag_sha} (peeled: ${peeled_sha:-none}), expected ${expected_sha}; refusing to dispatch publish.yml."
               exit 1
             fi
             if [ "$attempt" -eq 10 ]; then
-              echo "::error::Tag ${TAG} was not visible on origin after push; refusing to dispatch release.yml."
+              echo "::error::Tag ${TAG} was not visible on origin after push; refusing to dispatch publish.yml."
               exit 1
             fi
             echo "Waiting for tag ${TAG} to become visible on origin (${attempt}/10)."
             sleep 2
           done
-          gh workflow run release.yml --ref "${TAG}" -f tag="${TAG}"
-          echo "Dispatched release.yml for ${TAG}; it will publish packages and create the GitHub Release."
+          gh workflow run publish.yml --ref "${TAG}" -f tag="${TAG}"
+          echo "Dispatched publish.yml for ${TAG}; it will publish packages and create the GitHub Release."

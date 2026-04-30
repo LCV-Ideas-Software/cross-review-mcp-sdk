@@ -7,13 +7,7 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 ## [Unreleased]
 
-### Changed
-
-- Prepared npmjs.com publication for GitHub Actions Trusted Publishing/OIDC:
-  - added GitHub environment `npm-production` with deployment restricted to `v*` tags;
-  - attached the release workflow to `npm-production`;
-  - removed the permanent `NPM_TOKEN` requirement from the npmjs.com publish step while preserving provenance.
-- Removed the legacy token-backed npmjs.com dist-tag normalization step; npmjs.com releases now rely on the trusted publishing `npm publish --tag` path only.
+_No entries yet._
 
 ## [v02.03.00] - 2026-04-30
 
@@ -26,15 +20,16 @@ standard `v00.00.00`; npm package versions remain SemVer.
 ### Changed
 
 - Incorporated the community `/focus` suggestion as a cross-provider scope anchor instead of a Claude-specific slash command. Official Claude Code docs describe `/focus` as a focus-mode UI toggle, so `cross-review-v2` now uses explicit prompt context that applies equally to OpenAI/Codex, Anthropic/Claude, Gemini and DeepSeek.
+- Front-loaded the `Review Focus` block before task/history material in generation, review, revision and retry prompts, and added an explicit `OUT OF SCOPE` rejection clause so reviewers do not turn unrelated findings into blockers.
 - Promoted the release to minor because `review_focus` and `CROSS_REVIEW_V2_MAX_REVIEW_FOCUS_CHARS` expand the public MCP/configuration surface without breaking existing callers.
-- Aligned `auto-tag.yml` with the npm-production environment policy by creating lightweight release tags and dispatching `release.yml` on the tag ref instead of `main`.
-- Removed explicit npm token/provenance handling from npmjs.com publishing so Trusted Publishing can use the configured OIDC workflow identity without long-lived token fallback, and added an npm `>=11.5.1` gate before publish.
+- Aligned `auto-tag.yml` with the npm-production environment policy by creating lightweight release tags and dispatching `publish.yml` on the tag ref instead of `main`.
+- Standardized publishing with `cross-review-v1`: `publish.yml` now uses separate gate, npmjs.com, GitHub Packages and GitHub Release jobs, with npm Trusted Publishing, `--provenance`, and an npm `>=11.5.1` gate.
 
 ### Validation
 
 - `npm run format:check`
 - `npm run lint`
-- `npm test` — includes runtime smoke, redaction/truncation checks for `review_focus`, accidental `/focus` prefix stripping, and retry-path coverage for format recovery and decision retry prompts.
+- `npm test` — includes runtime smoke, redaction/truncation checks for `review_focus`, accidental `/focus` prefix stripping, front-loaded focus ordering, `OUT OF SCOPE` clause coverage, and retry-path coverage for format recovery and decision retry prompts.
 
 ## [v02.02.00] - 2026-04-30
 

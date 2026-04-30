@@ -203,7 +203,9 @@ Then open `http://127.0.0.1:4588`.
 
 Use optional `review_focus` when a broad review needs a stable scope anchor, for example `services/billing`, `src/core/session-store.ts`, or `release automation`.
 
-The field is available on `session_init`, `ask_peers`, `session_start_round`, `run_until_unanimous` and `session_start_unanimous`. Session-level focus is saved as `meta.review_focus`; per-call focus overrides it for that round or unanimous run. The runtime injects the value as a bounded/redacted Markdown `Review Focus` block into generation, review, revision and retry prompts. If an operator accidentally pastes a leading `/focus`, the prefix is stripped during normalization and only the plain scope text is forwarded.
+The field is available on `session_init`, `ask_peers`, `session_start_round`, `run_until_unanimous` and `session_start_unanimous`. Session-level focus is saved as `meta.review_focus`; per-call focus overrides it for that round or unanimous run. The runtime injects the value as a bounded/redacted Markdown `Review Focus` block at the start of generation, review, revision and retry prompts. If an operator accidentally pastes a leading `/focus`, the prefix is stripped during normalization and only the plain scope text is forwarded.
+
+The injected block also tells reviewers to label possible findings outside that focus as `OUT OF SCOPE` instead of counting them as blocking issues, unless the issue is a critical cross-cutting blocker that invalidates the result. This keeps broad reviews anchored without hiding genuinely fatal problems.
 
 This is intentionally not Claude Code's `/focus` slash command. Official Claude Code docs describe `/focus` as a focus-mode UI toggle; Cross Review uses `review_focus` so the same instruction works for OpenAI/Codex, Anthropic/Claude, Gemini and DeepSeek.
 

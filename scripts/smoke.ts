@@ -309,6 +309,11 @@ const reviewPromptPath = path.join(
 const reviewPrompt = fs.readFileSync(reviewPromptPath, "utf8");
 assert.match(reviewPrompt, /## Review Focus/);
 assert.match(reviewPrompt, /services\/billing/);
+assert.match(reviewPrompt, /OUT OF SCOPE/);
+assert.ok(
+  reviewPrompt.indexOf("## Review Focus") < reviewPrompt.indexOf("## Original Task"),
+  "Review Focus must be front-loaded before the task body",
+);
 assert.doesNotMatch(reviewPrompt, /\/focus\s+services\/billing/);
 
 const evidence = orchestrator.store.attachEvidence(result.session.session_id, {
@@ -370,6 +375,7 @@ const focusPromptPath = path.join(
 );
 const focusPrompt = fs.readFileSync(focusPromptPath, "utf8");
 assert.match(focusPrompt, /\[REDACTED\]/);
+assert.match(focusPrompt, /OUT OF SCOPE/);
 assert.doesNotMatch(focusPrompt, new RegExp(focusSecret));
 assert.doesNotMatch(focusPrompt, /\/focus\s+/);
 assert.doesNotMatch(focusPrompt, new RegExp("x".repeat(2_100)));
@@ -399,6 +405,12 @@ const formatRecoveryPrompt = fs.readFileSync(
 );
 assert.match(formatRecoveryPrompt, /## Review Focus/);
 assert.match(formatRecoveryPrompt, /recovery\/focus/);
+assert.match(formatRecoveryPrompt, /OUT OF SCOPE/);
+assert.ok(
+  formatRecoveryPrompt.indexOf("## Review Focus") <
+    formatRecoveryPrompt.indexOf("## Original Task"),
+  "Format recovery prompt must front-load Review Focus",
+);
 
 const emptyDecisionRecovered = await orchestrator.askPeers({
   task: "Verify automatic full decision retry after empty peer output.",
@@ -425,6 +437,11 @@ const decisionRetryPrompt = fs.readFileSync(
 );
 assert.match(decisionRetryPrompt, /## Review Focus/);
 assert.match(decisionRetryPrompt, /recovery\/focus/);
+assert.match(decisionRetryPrompt, /OUT OF SCOPE/);
+assert.ok(
+  decisionRetryPrompt.indexOf("## Review Focus") < decisionRetryPrompt.indexOf("## Original Task"),
+  "Decision retry prompt must front-load Review Focus",
+);
 
 const formatRecoveryFailed = await orchestrator.askPeers({
   task: "Verify automatic parser format recovery failure handling.",

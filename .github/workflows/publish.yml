@@ -1,0 +1,294 @@
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag/ref to publish, for example v02.03.00"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Pre-publish gate (test + metadata)
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.meta.outputs.name }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      display_tag: ${{ steps.meta.outputs.display_tag }}
+      dist_tag: ${{ steps.meta.outputs.dist_tag }}
+    steps:
+      - name: Validate publish ref
+        env:
+          PUBLISH_REF: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PUBLISH_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Publish ref must be a version tag (for example v02.03.00), got '$PUBLISH_REF'."
+            exit 1
+          fi
+          echo "Validated publish ref: $PUBLISH_REF"
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Verify
+        run: npm test
+        env:
+          CROSS_REVIEW_V2_STUB: "1"
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          NAME="$(node -p "require('./package.json').name")"
+          DISPLAY_TAG="$(echo "${VERSION%%-*}" | awk -F. '{ printf "v%02d.%02d.%02d", $1, $2, $3 }')"
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          if [ -z "$TAG" ]; then
+            TAG="$DISPLAY_TAG"
+          fi
+          if [[ "$VERSION" == *-* ]]; then
+            DIST_TAG="${VERSION#*-}"
+            DIST_TAG="${DIST_TAG%%.*}"
+          else
+            DIST_TAG="latest"
+          fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "display_tag=$DISPLAY_TAG" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+          echo "Publish metadata: $NAME@$VERSION -> $TAG ($DIST_TAG)"
+
+  publish-npmjs:
+    name: Publish to npmjs.com
+    needs: gate
+    runs-on: ubuntu-latest
+    environment: npm-production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup Node.js 24 for npmjs
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          # npm Trusted Publishing requires npm >=11.5.1.
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+          scope: "@lcv-ideas-software"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Verify trusted publishing toolchain
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          node <<'JS'
+          const { execFileSync } = require('node:child_process');
+          const version = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim();
+          const [major, minor, patch] = version.split('.').map(Number);
+          if (
+            !Number.isFinite(major) ||
+            major < 11 ||
+            (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))
+          ) {
+            throw new Error(`npm ${version} is too old for trusted publishing; require >=11.5.1`);
+          }
+          JS
+
+      - name: Check npmjs.com package version
+        id: npmjs-version
+        run: |
+          if npm view "${{ needs.gate.outputs.name }}@${{ needs.gate.outputs.version }}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${{ needs.gate.outputs.name }}@${{ needs.gate.outputs.version }} already exists on npmjs.com; skipping publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "${{ needs.gate.outputs.name }}@${{ needs.gate.outputs.version }} is not published on npmjs.com yet."
+          fi
+
+      - name: Publish (public, with provenance)
+        if: steps.npmjs-version.outputs.exists != 'true'
+        run: npm publish --access public --provenance --tag "${{ needs.gate.outputs.dist_tag }}"
+
+      - name: Verify npmjs.com public visibility
+        env:
+          PACKAGE_NAME: ${{ needs.gate.outputs.name }}
+          PACKAGE_VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          REGISTRY_PATH="$(node -e "process.stdout.write(encodeURIComponent(process.env.PACKAGE_NAME))")"
+          URL="https://registry.npmjs.org/${REGISTRY_PATH}"
+          for attempt in {1..12}; do
+            if curl -fsS "$URL" | node -e '
+              let data = "";
+              process.stdin.on("data", (chunk) => { data += chunk; });
+              process.stdin.on("end", () => {
+                const pkg = JSON.parse(data);
+                process.exit(pkg.versions && pkg.versions[process.env.PACKAGE_VERSION] ? 0 : 1);
+              });
+            '; then
+              echo "${PACKAGE_NAME}@${PACKAGE_VERSION} is publicly visible on npmjs.com."
+              exit 0
+            fi
+            echo "npmjs.com visibility check attempt ${attempt}/12 failed; retrying."
+            sleep 10
+          done
+          echo "::error::${PACKAGE_NAME}@${PACKAGE_VERSION} is not publicly visible on npmjs.com."
+          exit 1
+
+  publish-gh-packages:
+    name: Publish to GitHub Packages
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup Node.js 24 for GitHub Packages
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@lcv-ideas-software"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Check GitHub Packages version
+        id: gh-packages-version
+        run: |
+          if npm view "${{ needs.gate.outputs.name }}@${{ needs.gate.outputs.version }}" version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${{ needs.gate.outputs.name }}@${{ needs.gate.outputs.version }} already exists on GitHub Packages; skipping publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "${{ needs.gate.outputs.name }}@${{ needs.gate.outputs.version }} is not published on GitHub Packages yet."
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish (public, with provenance)
+        if: steps.gh-packages-version.outputs.exists != 'true'
+        run: npm publish --access public --provenance --tag "${{ needs.gate.outputs.dist_tag }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  create-github-release:
+    name: Create GitHub Release
+    needs: [gate, publish-npmjs, publish-gh-packages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Create artifact directory
+        run: mkdir -p ./artifacts
+
+      - name: Pack artifact
+        run: npm pack --pack-destination ./artifacts
+
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        env:
+          TAG: ${{ needs.gate.outputs.tag }}
+          PACKAGE_VERSION: ${{ needs.gate.outputs.version }}
+          DISPLAY_TAG: ${{ needs.gate.outputs.display_tag }}
+        run: |
+          SEMVER_TAG="v${PACKAGE_VERSION}"
+          SEMVER_NO_PREFIX="${PACKAGE_VERSION}"
+          DISPLAY_NO_PREFIX="${DISPLAY_TAG#v}"
+          TAG_NO_PREFIX="${TAG#v}"
+          NOTES=$(awk \
+            -v tag="$TAG" \
+            -v tag_np="$TAG_NO_PREFIX" \
+            -v display="$DISPLAY_TAG" \
+            -v display_np="$DISPLAY_NO_PREFIX" \
+            -v semver="$SEMVER_TAG" \
+            -v semver_np="$SEMVER_NO_PREFIX" '
+            $0 == "## [" tag "]" || $0 == "## [" tag_np "]" ||
+            $0 == "## [" display "]" || $0 == "## [" display_np "]" ||
+            $0 == "## [" semver "]" || $0 == "## [" semver_np "]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            NOTES="Release $TAG. See CHANGELOG.md for details."
+          fi
+          {
+            echo "notes<<RELEASE_NOTES_EOF"
+            echo "$NOTES"
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or update release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.gate.outputs.tag }}
+          NOTES: ${{ steps.notes.outputs.notes }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping create."
+            exit 0
+          fi
+          gh release create "$TAG" artifacts/*.tgz \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "cross-review-v2 $TAG" \
+            --notes "$NOTES" \
+            --latest

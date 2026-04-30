@@ -19,7 +19,7 @@ const ReviewFocusSchema = z
   .min(1)
   .max(4_000)
   .describe(
-    "Optional provider-neutral review scope anchor. This is not Claude Code's /focus UI command; it is injected as a plain Review Focus prompt block for every selected peer.",
+    "Optional provider-neutral review scope anchor. This is not Claude Code's /focus UI command; it is injected as a front-loaded Review Focus prompt block for every selected peer, including OUT OF SCOPE handling for unrelated findings.",
   )
   .optional();
 
