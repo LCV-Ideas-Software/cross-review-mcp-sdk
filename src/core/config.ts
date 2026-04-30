@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { AppConfig, PeerId } from "./types.js";
 
-export const VERSION = "2.3.0";
+export const VERSION = "2.3.1";
 export const RELEASE_DATE = "2026-04-30";
 export const DEFAULT_MAX_OUTPUT_TOKENS = 20_000;
 

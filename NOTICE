@@ -1,4 +1,4 @@
-cross-review-mcp
+cross-review-v2
 Copyright 2026 Leonardo Cardozo Vargas
 
 This product is licensed under the Apache License, Version 2.0
@@ -21,5 +21,6 @@ Third-party dependencies
 This product includes software developed by third parties. Runtime
 dependencies and their licenses are listed in package.json and can be
 audited via `npm ls --all` and `npm-license-crawler` (not bundled).
-At the time of v0.9.0-alpha, the only direct runtime dependency is
-`@modelcontextprotocol/sdk` (MIT).
+At the time of v2.3.1, direct runtime dependencies are the official provider
+SDKs, `@modelcontextprotocol/sdk`, `pino`, and `zod`. See package.json and
+package-lock.json for the exact dependency graph.

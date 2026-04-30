@@ -4,14 +4,30 @@
 
 # cross-review-v2
 
-API-first MCP server for multi-model cross-review with unanimous convergence gates.
+> MCP server orchestrating API-first cross-review between Claude, ChatGPT Codex, Gemini, and DeepSeek with unanimous convergence gates.
 
-![status](https://img.shields.io/badge/status-stable-brightgreen)
-![runtime](https://img.shields.io/badge/runtime-API--only-blue)
-![license](https://img.shields.io/badge/license-Apache--2.0-green)
-![security](https://img.shields.io/badge/CodeQL-Default%20Setup-blue)
+[![status: stable](https://img.shields.io/badge/status-stable-brightgreen.svg)](#status)
+[![npm](https://img.shields.io/npm/v/@lcv-ideas-software/cross-review-v2.svg)](https://www.npmjs.com/package/@lcv-ideas-software/cross-review-v2)
+[![runtime: API-only](https://img.shields.io/badge/runtime-API--only-blue.svg)](#what-it-does)
+[![security: CodeQL Default Setup](https://img.shields.io/badge/security-CodeQL%20Default%20Setup-informational.svg)](#security)
+[![license: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
-## What This Is
+**Install.** `npm install -g @lcv-ideas-software/cross-review-v2` (npmjs.com) or `npm install -g @lcv-ideas-software/cross-review-v2 --registry=https://npm.pkg.github.com` (GitHub Packages mirror).
+
+**Status.** Stable. Current release: **v02.03.01** (npm package `2.3.1`) paired with an API-first stable public surface. See [CHANGELOG.md](./CHANGELOG.md) for the release history. v2.x releases use the organization display-tag standard (`v00.00.00`) while npm packages keep SemVer (`2.x.y`). The stable public rename from the temporary development name was completed at **v02.01.00** / npm package `2.1.0`, and all active docs, package metadata, publishing workflows, and runtime identity now use `cross-review-v2`.
+
+The version history at a glance:
+
+| Release | Scope |
+|---|---|
+| **`v02.03.01`** | **README organizational standardization.** Harmonized the public README opening with the shared organizational pattern, preserving the API-first operational sections while aligning badges, status framing, and version-history presentation. |
+| **`v02.03.00`** | **Review focus tightening.** Added provider-neutral `review_focus` across the main orchestration tools, front-loaded it in prompts, stripped accidental `/focus` prefixes, and introduced explicit `OUT OF SCOPE` guidance so reviewers stay anchored without hiding critical blockers. |
+| **`v02.02.00`** | **Live token streaming.** Added real provider token streaming, count-based progress events, `CROSS_REVIEW_V2_STREAM_TOKENS`, optional redacted streamed text for trusted diagnostics, and a real API streaming smoke. |
+| **`v02.01.01`** | **Hardening and advanced-model enforcement.** Closed CodeQL issues in redaction/logging, added decision-retry recovery, standardized `CROSS_REVIEW_V2_MAX_OUTPUT_TOKENS`, removed weak/deprecated model fallbacks, and enforced advanced thinking-capable peer selection. |
+| **`v02.01.00`** | **First stable release as cross-review-v2.** Promoted the API-first implementation to stable, added cancellation, restart recovery, metrics, runtime capabilities, fallback events, and completed the public rename to `cross-review-v2`. |
+| **`v2.0.x`** | **Foundation hardening before stability.** The pre-stable `v02.00.xx` line built the durable session model, dashboard/reporting surface, provider adapters, retry behavior, and release/publishing baseline that enabled the stable cut. |
+
+## What It Does
 
 `cross-review-v2` is the stable API-first implementation of the cross-review pattern. It does not execute Claude CLI, Codex CLI, Gemini CLI, DeepSeek CLI, PowerShell shells, or terminal sessions. The peers are called through provider APIs and official client libraries:
 
@@ -21,6 +37,19 @@ API-first MCP server for multi-model cross-review with unanimous convergence gat
 - OpenAI-compatible DeepSeek API through the OpenAI client library.
 
 Runtime calls are real provider calls by default. Stubs exist only for smoke tests and CI when `CROSS_REVIEW_V2_STUB=1`.
+
+## Topology
+
+`cross-review-v2` is MCP stdio on the outside and provider-API orchestration on the inside. The caller host opens a durable session, the server fans out to the four peers through official APIs, and convergence is granted only when the unanimity gate is satisfied.
+
+## Peers and Transport
+
+| Peer | Transport | Notes |
+|---|---|---|
+| `codex` | OpenAI API via official client library | Advanced reasoning model selection with explicit reasoning effort controls. |
+| `claude` | Anthropic API via official TypeScript SDK | Advanced Opus-class selection with adaptive thinking. |
+| `gemini` | Google Gen AI SDK | Advanced Gemini 3.1 Pro preview selection with thinking-capable preference. |
+| `deepseek` | DeepSeek OpenAI-compatible API via OpenAI client library | Advanced `deepseek-v4-pro` selection with reasoning effort controls. |
 
 ## Rename Notice
 
@@ -209,7 +238,7 @@ The injected block also tells reviewers to label possible findings outside that 
 
 This is intentionally not Claude Code's `/focus` slash command. Official Claude Code docs describe `/focus` as a focus-mode UI toggle; Cross Review uses `review_focus` so the same instruction works for OpenAI/Codex, Anthropic/Claude, Gemini and DeepSeek.
 
-## Session Observability
+## Observe the Session
 
 Session metadata records in-flight rounds, convergence scope, convergence health, failed attempts, operator escalations, fallback events and attached evidence files. Each session can also produce `events.ndjson`, aggregate metrics and `session-report.md`, so long-running runs can be followed without waiting for a synchronous MCP call to return.
 
@@ -221,7 +250,7 @@ When a provider rejects a prompt through moderation or safety filtering, the orc
 
 Secret redaction is applied when prompts, responses, evidence and JSON metadata are written. The redactor covers known API-key and token formats; new credential formats should be added before public test fixtures are promoted.
 
-## Security Baseline
+## Security
 
 - Public-repo ready `.gitignore`.
 - No secrets in committed files.
@@ -233,6 +262,18 @@ Secret redaction is applied when prompts, responses, evidence and JSON metadata 
 
 ## Status
 
-Current version: `v02.03.00` (npm package `2.3.0`).
+Current version: `v02.03.01` (npm package `2.3.1`).
 
 Version `v02.01.00` (npm package `2.1.0`) is the first stable release of `cross-review-v2`.
+
+## License
+
+**Apache License 2.0** — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+
+Copyright 2026 Leonardo Cardozo Vargas.
+
+## Links
+
+- Release history: [`CHANGELOG.md`](./CHANGELOG.md)
+- Security: [`SECURITY.md`](./SECURITY.md)
+- License: [`LICENSE`](./LICENSE)

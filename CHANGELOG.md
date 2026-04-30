@@ -9,6 +9,13 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 _No entries yet._
 
+## [v02.03.01] - 2026-04-30
+
+### Changed
+
+- `README.md` now follows the shared organizational opening pattern adopted across the public repositories, while preserving the API-first runtime, model-selection, streaming, and observability sections specific to `cross-review-v2`.
+- `NOTICE` and `CODE_OF_CONDUCT.md` now use the stable `cross-review-v2` project name and current dependency framing, completing the active-document rename cleanup.
+
 ## [v02.03.00] - 2026-04-30
 
 ### Added
