@@ -27,6 +27,7 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 - Incorporated the community `/focus` suggestion as a cross-provider scope anchor instead of a Claude-specific slash command. Official Claude Code docs describe `/focus` as a focus-mode UI toggle, so `cross-review-v2` now uses explicit prompt context that applies equally to OpenAI/Codex, Anthropic/Claude, Gemini and DeepSeek.
 - Promoted the release to minor because `review_focus` and `CROSS_REVIEW_V2_MAX_REVIEW_FOCUS_CHARS` expand the public MCP/configuration surface without breaking existing callers.
+- Aligned `auto-tag.yml` with the npm-production environment policy by creating lightweight release tags and dispatching `release.yml` on the tag ref instead of `main`.
 
 ### Validation
 

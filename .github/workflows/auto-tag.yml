@@ -4,6 +4,10 @@ name: Auto-tag on version bump
 # vXX.XX.XX with zero-padded numeric segments. package.json keeps npm SemVer
 # shape and may include prerelease labels; the display tag is derived from the
 # numeric base version.
+#
+# GitHub does not start a second workflow from a tag push created with
+# GITHUB_TOKEN, so this workflow explicitly dispatches release.yml on the tag
+# ref. The npm-production environment allows v* tag refs, not main.
 
 on:
   push:
@@ -72,9 +76,9 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" -m "${TAG}: auto-tagged from package.json on push to main"
+          git tag "${TAG}" HEAD
           git push origin "${TAG}"
-          echo "Created and pushed ${TAG}."
+          echo "Created and pushed lightweight tag ${TAG}."
 
       - name: Dispatch release workflow
         if: steps.check.outputs.exists == 'false'
@@ -83,5 +87,28 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          gh workflow run release.yml --ref main -f tag="${TAG}"
+          expected_sha="$(git rev-parse HEAD)"
+          for attempt in {1..10}; do
+            tag_sha="$(git ls-remote --tags origin "refs/tags/${TAG}" | awk '{print $1}')"
+            peeled_sha="$(git ls-remote --tags origin "refs/tags/${TAG}^{}" | awk '{print $1}')"
+            if [ -n "${tag_sha}" ]; then
+              if [ "${tag_sha}" = "${expected_sha}" ]; then
+                echo "Tag ${TAG} is visible on origin as a lightweight tag at ${expected_sha}."
+                break
+              fi
+              if [ "${peeled_sha}" = "${expected_sha}" ]; then
+                echo "::warning::Tag ${TAG} is annotated but peels to ${expected_sha}; proceeding for compatibility. New auto-created tags are lightweight."
+                break
+              fi
+              echo "::error::Tag ${TAG} points to ${tag_sha} (peeled: ${peeled_sha:-none}), expected ${expected_sha}; refusing to dispatch release.yml."
+              exit 1
+            fi
+            if [ "$attempt" -eq 10 ]; then
+              echo "::error::Tag ${TAG} was not visible on origin after push; refusing to dispatch release.yml."
+              exit 1
+            fi
+            echo "Waiting for tag ${TAG} to become visible on origin (${attempt}/10)."
+            sleep 2
+          done
+          gh workflow run release.yml --ref "${TAG}" -f tag="${TAG}"
           echo "Dispatched release.yml for ${TAG}; it will publish packages and create the GitHub Release."
