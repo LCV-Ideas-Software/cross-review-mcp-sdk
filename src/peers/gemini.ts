@@ -141,19 +141,20 @@ export class GeminiAdapter extends BasePeerAdapter implements PeerAdapter {
         if (this.shouldStreamTokens(context)) {
           const stream = await this.client().models.generateContentStream(params);
           const stream_buffer = new StreamBuffer(this.id);
+          const tokenStream = this.createTokenEventBuffer(
+            context,
+            "review",
+            "generateContentStream.text",
+          );
           let last: GeminiResponse | undefined;
           for await (const chunk of stream as AsyncGenerator<GeminiResponse>) {
             last = chunk;
             const delta = chunk.text ?? "";
             stream_buffer.append(delta);
-            this.emitTokenDelta(context, {
-              phase: "review",
-              delta,
-              source: "generateContentStream.text",
-            });
+            tokenStream.append(delta);
           }
           const text = stream_buffer.text();
-          this.emitTokenCompleted(context, { phase: "review", chars: text.length });
+          tokenStream.complete(text.length);
           return this.resultFromText({
             text: text || (last?.text ?? JSON.stringify(last ?? {})),
             raw: { streamed: true, provider: this.provider, model: last?.modelVersion },
@@ -202,19 +203,20 @@ export class GeminiAdapter extends BasePeerAdapter implements PeerAdapter {
         if (this.shouldStreamTokens(context)) {
           const stream = await this.client().models.generateContentStream(params);
           const stream_buffer = new StreamBuffer(this.id);
+          const tokenStream = this.createTokenEventBuffer(
+            context,
+            "generation",
+            "generateContentStream.text",
+          );
           let last: GeminiResponse | undefined;
           for await (const chunk of stream as AsyncGenerator<GeminiResponse>) {
             last = chunk;
             const delta = chunk.text ?? "";
             stream_buffer.append(delta);
-            this.emitTokenDelta(context, {
-              phase: "generation",
-              delta,
-              source: "generateContentStream.text",
-            });
+            tokenStream.append(delta);
           }
           const text = stream_buffer.text();
-          this.emitTokenCompleted(context, { phase: "generation", chars: text.length });
+          tokenStream.complete(text.length);
           return this.generationFromText({
             text: text || (last?.text ?? JSON.stringify(last ?? {})),
             raw: { streamed: true, provider: this.provider, model: last?.modelVersion },

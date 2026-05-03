@@ -1064,7 +1064,10 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   staleRaw.updated_at = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
   fs.writeFileSync(staleMetaPath, JSON.stringify(staleRaw, null, 2), "utf8");
   const sweep = staleStore.abortStaleSessions();
-  assert.ok(sweep.aborted >= 1, `abortStaleSessions must abort ≥1 stale session, got ${sweep.aborted}`);
+  assert.ok(
+    sweep.aborted >= 1,
+    `abortStaleSessions must abort ≥1 stale session, got ${sweep.aborted}`,
+  );
   const after = staleStore.read(staleId);
   assert.equal(after.outcome, "aborted");
   assert.ok(
@@ -1093,7 +1096,10 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
     },
   });
   const inflightMetaPath = inflightStore.metaPath(inflightId);
-  const inflightRaw = JSON.parse(fs.readFileSync(inflightMetaPath, "utf8")) as Record<string, unknown>;
+  const inflightRaw = JSON.parse(fs.readFileSync(inflightMetaPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
   inflightRaw.updated_at = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
   fs.writeFileSync(inflightMetaPath, JSON.stringify(inflightRaw, null, 2), "utf8");
   const sweep = inflightStore.abortStaleSessions();
@@ -1209,8 +1215,16 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   // Round 1 hits ceiling, gate grants (effectiveMaxRounds: 1 → 2). Round 2
   // hits new ceiling with same blocker fingerprint, gate skips. Loop exits
   // at rounds=2.
-  assert.equal(autoGrantResult.converged, false, "auto-grant test must not converge with FORCE_NEEDS_EVIDENCE");
-  assert.equal(autoGrantResult.rounds, 2, `expected rounds=2 after one auto-grant + one repeat-block, got ${autoGrantResult.rounds}`);
+  assert.equal(
+    autoGrantResult.converged,
+    false,
+    "auto-grant test must not converge with FORCE_NEEDS_EVIDENCE",
+  );
+  assert.equal(
+    autoGrantResult.rounds,
+    2,
+    `expected rounds=2 after one auto-grant + one repeat-block, got ${autoGrantResult.rounds}`,
+  );
   assert.ok(
     autoGrantEvents.includes("session.auto_round_granted"),
     "auto-grant test must emit session.auto_round_granted at round 1",
@@ -1250,12 +1264,144 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
     max_rounds: 1,
   });
   assert.equal(blockedResult.converged, false);
-  assert.equal(blockedResult.rounds, 1, `expected rounds=1 (no auto-grant) when peer NOT_READY, got ${blockedResult.rounds}`);
+  assert.equal(
+    blockedResult.rounds,
+    1,
+    `expected rounds=1 (no auto-grant) when peer NOT_READY, got ${blockedResult.rounds}`,
+  );
   assert.ok(
     !blockedEvents.includes("session.auto_round_granted"),
     "auto-grant must NOT fire when any peer is NOT_READY",
   );
   console.log("[smoke] auto_grant_blocked_by_not_ready_test: PASS");
+}
+
+// v2.6.0: token-delta event compaction. Streaming adapters used to emit
+// one `peer.token.delta` event per chunk (50-200 per response in v2.5.x;
+// 96k of 98k events in the 253-session corpus). v2.6.0 buffers deltas
+// and flushes a coalesced delta either when the buffer crosses 1 KiB or
+// when 250 ms has elapsed since the last flush. Verbose escape hatch
+// `CROSS_REVIEW_V2_TOKEN_DELTA_VERBOSE=1` restores legacy chunk-level
+// emit. Smoke proof: with default thresholds, the stub's 32-char chunks
+// in a single response produce far fewer delta events than the chunk
+// count.
+{
+  const tdBuf = await import("../src/peers/base.js");
+  const { TokenEventBuffer } = tdBuf;
+  // Default-mode: bytes threshold 1024, ms threshold 250.
+  let defaultDeltaCount = 0;
+  let defaultCompletedCount = 0;
+  const defaultBuf = new TokenEventBuffer(
+    () => {
+      defaultDeltaCount += 1;
+    },
+    () => {
+      defaultCompletedCount += 1;
+    },
+    1024,
+    250,
+    false,
+  );
+  // 50 chunks of 32 chars each = 1600 chars total. With 1024 bytes
+  // threshold, expect 2 flushes (1024 + remainder); ms can also trip
+  // intermittently but in synchronous loop ms is ~0.
+  for (let i = 0; i < 50; i += 1) {
+    defaultBuf.append("a".repeat(32));
+  }
+  defaultBuf.complete(50 * 32);
+  assert.ok(
+    defaultDeltaCount < 50,
+    `default-mode buffer must emit fewer events than chunk count, got ${defaultDeltaCount} of 50`,
+  );
+  assert.equal(defaultCompletedCount, 1);
+  // Verbose mode: every chunk emits.
+  let verboseDeltaCount = 0;
+  let verboseCompletedCount = 0;
+  const verboseBuf = new TokenEventBuffer(
+    () => {
+      verboseDeltaCount += 1;
+    },
+    () => {
+      verboseCompletedCount += 1;
+    },
+    1024,
+    250,
+    true,
+  );
+  for (let i = 0; i < 50; i += 1) {
+    verboseBuf.append("a".repeat(32));
+  }
+  verboseBuf.complete(50 * 32);
+  assert.equal(verboseDeltaCount, 50, "verbose-mode buffer must emit one event per chunk");
+  assert.equal(verboseCompletedCount, 1);
+  console.log("[smoke] token_delta_event_compaction_test: PASS");
+}
+
+// v2.6.0 R1 fix (Gemini): the msThreshold setTimeout MUST fire even
+// when no further chunks arrive (covers stream stalls). Without the
+// timer, a single small chunk followed by a network pause would keep
+// tokens trapped until the next chunk or complete(). With the timer,
+// the buffer flushes after msThreshold ms.
+{
+  const tdBuf = await import("../src/peers/base.js");
+  const { TokenEventBuffer } = tdBuf;
+  let stallDeltaCount = 0;
+  let stallCompletedCount = 0;
+  const stallBuf = new TokenEventBuffer(
+    () => {
+      stallDeltaCount += 1;
+    },
+    () => {
+      stallCompletedCount += 1;
+    },
+    1024, // chars threshold (won't trip with small append)
+    50, // ms threshold (short for fast smoke)
+    false,
+  );
+  stallBuf.append("a".repeat(64)); // 64 < 1024 chars threshold
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(
+    stallDeltaCount,
+    1,
+    `setTimeout-based flush must fire on stream stall, got delta count ${stallDeltaCount}`,
+  );
+  stallBuf.complete(64);
+  assert.equal(stallDeltaCount, 1, "complete() after timer-flush must not re-emit a delta");
+  assert.equal(stallCompletedCount, 1);
+  console.log("[smoke] token_delta_stall_timer_test: PASS");
+}
+
+// v2.6.0 R1 fix (Codex): complete() must use try/finally so
+// emitCompleted always fires even if the final flushDelta throws.
+{
+  const tdBuf = await import("../src/peers/base.js");
+  const { TokenEventBuffer } = tdBuf;
+  let emittedCompleted = 0;
+  const throwingBuf = new TokenEventBuffer(
+    () => {
+      throw new Error("synthetic emit failure");
+    },
+    () => {
+      emittedCompleted += 1;
+    },
+    1024,
+    250,
+    false,
+  );
+  throwingBuf.append("buffered");
+  let propagated: Error | null = null;
+  try {
+    throwingBuf.complete(8);
+  } catch (err) {
+    propagated = err instanceof Error ? err : null;
+  }
+  assert.equal(
+    emittedCompleted,
+    1,
+    "emitCompleted must fire even when flushDelta throws (try/finally)",
+  );
+  assert.ok(propagated && /synthetic emit failure/.test(propagated.message));
+  console.log("[smoke] token_delta_complete_try_finally_test: PASS");
 }
 
 // v2.5.0 NOTE: smoke coverage for the format-recovery hard budget gate

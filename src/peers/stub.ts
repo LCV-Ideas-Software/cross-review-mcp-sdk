@@ -64,10 +64,11 @@ export class StubAdapter extends BasePeerAdapter implements PeerAdapter {
 
   private streamStubText(context: PeerCallContext, phase: "review" | "generation", text: string) {
     if (!this.shouldStreamTokens(context)) return;
+    const tokenStream = this.createTokenEventBuffer(context, phase, "stub.chunk");
     for (const delta of text.match(/.{1,32}/gs) ?? []) {
-      this.emitTokenDelta(context, { phase, delta, source: "stub.chunk" });
+      tokenStream.append(delta);
     }
-    this.emitTokenCompleted(context, { phase, chars: text.length });
+    tokenStream.complete(text.length);
   }
 
   async probe(): Promise<PeerProbeResult> {

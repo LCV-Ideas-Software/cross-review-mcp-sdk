@@ -1414,12 +1414,7 @@ export class CrossReviewOrchestrator {
           const everyPeerReadyOrNeedsEvidence = peerStatuses.every(
             (status) => status === "READY" || status === "NEEDS_EVIDENCE",
           );
-          if (
-            !hasNotReady &&
-            !hasRejected &&
-            hasNeedsEvidence &&
-            everyPeerReadyOrNeedsEvidence
-          ) {
+          if (!hasNotReady && !hasRejected && hasNeedsEvidence && everyPeerReadyOrNeedsEvidence) {
             const fingerprint = blockerFingerprint(latestRound.peers);
             if (fingerprint === lastGrantBlockerFingerprint) {
               this.emit({

@@ -89,6 +89,84 @@ export function appendStreamText(peer: string, buffer: string, delta: string): s
   return buffer + delta;
 }
 
+// v2.6.0 (Codex+Gemini audit, 2026-05-03): coalesce streaming token
+// deltas before emit. Empirical measurement of 253 historical sessions
+// surfaced 96 282 of 98 664 events (97.6%) as `peer.token.delta` —
+// dominant noise in events.ndjson. Each provider chunk used to fire a
+// dedicated event; a single response could produce 50-200 events. We
+// now buffer deltas and flush a coalesced delta either when the buffer
+// crosses a char-count threshold (synchronous) OR when a setTimeout
+// for the configured ms threshold fires (covers stream stalls — Gemini
+// R1 catch). Total emitted chars are preserved; the difference is
+// event granularity, not content.
+//
+// Verbose escape hatch: `CROSS_REVIEW_V2_TOKEN_DELTA_VERBOSE=1` makes
+// every chunk emit immediately (legacy v2.5.x behavior) for operators
+// who want chunk-level observability.
+export class TokenEventBuffer {
+  private buffered = "";
+  private flushTimer: NodeJS.Timeout | null = null;
+  private completed = false;
+
+  constructor(
+    private readonly flushDelta: (delta: string) => void,
+    private readonly emitCompleted: (chars: number) => void,
+    private readonly charsThreshold: number,
+    private readonly msThreshold: number,
+    private readonly verbose: boolean,
+  ) {}
+
+  append(delta: string): void {
+    if (!delta || this.completed) return;
+    if (this.verbose) {
+      this.flushDelta(delta);
+      return;
+    }
+    this.buffered += delta;
+    if (this.buffered.length >= this.charsThreshold) {
+      this.flushPending();
+      return;
+    }
+    // v2.6.0 R1 fix (Gemini): setTimeout covers stream stalls. If a
+    // chunk arrives but no further chunks for `msThreshold` ms (network
+    // pause, slow LLM), the timer ensures the buffered delta still
+    // emits without waiting for `complete()` or the next chunk.
+    if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = null;
+        this.flushPending();
+      }, this.msThreshold);
+      // Don't keep the event loop alive just for this timer.
+      this.flushTimer.unref?.();
+    }
+  }
+
+  private flushPending(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (!this.buffered) return;
+    const pending = this.buffered;
+    this.buffered = "";
+    this.flushDelta(pending);
+  }
+
+  // v2.6.0 R1 fix (Codex): try/finally guarantees emitCompleted fires
+  // even if the final flushDelta throws. Marks completed so any
+  // late-arriving append (e.g. from a delayed event handler) is a no-op
+  // rather than re-emitting after completion.
+  complete(chars: number): void {
+    if (this.completed) return;
+    this.completed = true;
+    try {
+      this.flushPending();
+    } finally {
+      this.emitCompleted(chars);
+    }
+  }
+}
+
 export abstract class BasePeerAdapter {
   abstract id: PeerId;
   abstract provider: string;
@@ -155,6 +233,39 @@ export abstract class BasePeerAdapter {
         chars: params.chars,
       },
     });
+  }
+
+  // v2.6.0: build a per-call TokenEventBuffer that coalesces token
+  // deltas before emit. Each adapter call should construct the buffer
+  // once at the start of streaming, append every chunk, and call
+  // complete() at the end. The buffer respects shouldStreamTokens (no-
+  // op when streaming is disabled) and the verbose escape hatch.
+  protected createTokenEventBuffer(
+    context: PeerCallContext,
+    phase: "review" | "generation",
+    source = "text",
+  ): TokenEventBuffer {
+    const flushDelta = (delta: string) => this.emitTokenDelta(context, { phase, delta, source });
+    const emitCompleted = (chars: number) => this.emitTokenCompleted(context, { phase, chars });
+    // v2.6.0 R1 (Gemini catch): renamed to charsThreshold for clarity
+    // (we measure UTF-16 code units, not UTF-8 bytes). The legacy env
+    // var name is preserved for op compatibility but read into the
+    // semantically correct field. A new alias env var is also accepted.
+    const charsThreshold = Math.max(
+      1,
+      Number.parseInt(
+        process.env.CROSS_REVIEW_V2_TOKEN_DELTA_CHARS_THRESHOLD ??
+          process.env.CROSS_REVIEW_V2_TOKEN_DELTA_BYTES_THRESHOLD ??
+          "",
+        10,
+      ) || 1024,
+    );
+    const msThreshold = Math.max(
+      1,
+      Number.parseInt(process.env.CROSS_REVIEW_V2_TOKEN_DELTA_MS_THRESHOLD ?? "", 10) || 250,
+    );
+    const verbose = process.env.CROSS_REVIEW_V2_TOKEN_DELTA_VERBOSE === "1";
+    return new TokenEventBuffer(flushDelta, emitCompleted, charsThreshold, msThreshold, verbose);
   }
 
   protected resultFromText(params: {

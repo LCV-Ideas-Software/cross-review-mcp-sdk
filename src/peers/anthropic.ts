@@ -141,6 +141,11 @@ export class AnthropicAdapter extends BasePeerAdapter implements PeerAdapter {
           // directly, but throwing on overflow propagates through the
           // promise chain and the retry layer classifies the failure.
           const stream = this.client().messages.stream(body, { signal: context.signal });
+          const tokenStream = this.createTokenEventBuffer(
+            context,
+            "review",
+            "content_block_delta.text_delta",
+          );
           let streamedBytes = 0;
           stream.on("text", (delta) => {
             streamedBytes += Buffer.byteLength(delta, "utf8");
@@ -148,15 +153,11 @@ export class AnthropicAdapter extends BasePeerAdapter implements PeerAdapter {
               stream.controller.abort();
               throw new StreamBufferOverflowError(this.id, streamedBytes);
             }
-            this.emitTokenDelta(context, {
-              phase: "review",
-              delta,
-              source: "content_block_delta.text_delta",
-            });
+            tokenStream.append(delta);
           });
           const message = await stream.finalMessage();
           const text = textFromAnthropicContent(message.content);
-          this.emitTokenCompleted(context, { phase: "review", chars: text.length });
+          tokenStream.complete(text.length);
           return this.resultFromText({
             text,
             raw: { streamed: true, provider: this.provider, model: message.model },
@@ -205,6 +206,11 @@ export class AnthropicAdapter extends BasePeerAdapter implements PeerAdapter {
         };
         if (this.shouldStreamTokens(context)) {
           const stream = this.client().messages.stream(body, { signal: context.signal });
+          const tokenStream = this.createTokenEventBuffer(
+            context,
+            "generation",
+            "content_block_delta.text_delta",
+          );
           let streamedBytes = 0;
           stream.on("text", (delta) => {
             streamedBytes += Buffer.byteLength(delta, "utf8");
@@ -212,15 +218,11 @@ export class AnthropicAdapter extends BasePeerAdapter implements PeerAdapter {
               stream.controller.abort();
               throw new StreamBufferOverflowError(this.id, streamedBytes);
             }
-            this.emitTokenDelta(context, {
-              phase: "generation",
-              delta,
-              source: "content_block_delta.text_delta",
-            });
+            tokenStream.append(delta);
           });
           const message = await stream.finalMessage();
           const text = textFromAnthropicContent(message.content);
-          this.emitTokenCompleted(context, { phase: "generation", chars: text.length });
+          tokenStream.complete(text.length);
           return this.generationFromText({
             text,
             raw: { streamed: true, provider: this.provider, model: message.model },

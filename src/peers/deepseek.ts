@@ -159,6 +159,11 @@ export class DeepSeekAdapter extends BasePeerAdapter implements PeerAdapter {
             timeout: this.config.retry.timeout_ms,
           });
           const stream_buffer = new StreamBuffer(this.id);
+          const tokenStream = this.createTokenEventBuffer(
+            context,
+            "review",
+            "chat.completion.chunk.delta",
+          );
           let usage: TokenUsage | undefined;
           let modelReported: string | undefined;
           let chunks = 0;
@@ -169,15 +174,11 @@ export class DeepSeekAdapter extends BasePeerAdapter implements PeerAdapter {
             for (const choice of chunk.choices ?? []) {
               const delta = choice.delta?.content ?? "";
               stream_buffer.append(delta);
-              this.emitTokenDelta(context, {
-                phase: "review",
-                delta,
-                source: "chat.completion.chunk.delta",
-              });
+              tokenStream.append(delta);
             }
           }
           const text = stream_buffer.text();
-          this.emitTokenCompleted(context, { phase: "review", chars: text.length });
+          tokenStream.complete(text.length);
           return this.resultFromText({
             text,
             raw: { streamed: true, provider: this.provider, chunks, model: modelReported },
@@ -239,6 +240,11 @@ export class DeepSeekAdapter extends BasePeerAdapter implements PeerAdapter {
             timeout: this.config.retry.timeout_ms,
           });
           const stream_buffer = new StreamBuffer(this.id);
+          const tokenStream = this.createTokenEventBuffer(
+            context,
+            "generation",
+            "chat.completion.chunk.delta",
+          );
           let usage: TokenUsage | undefined;
           let modelReported: string | undefined;
           let chunks = 0;
@@ -249,15 +255,11 @@ export class DeepSeekAdapter extends BasePeerAdapter implements PeerAdapter {
             for (const choice of chunk.choices ?? []) {
               const delta = choice.delta?.content ?? "";
               stream_buffer.append(delta);
-              this.emitTokenDelta(context, {
-                phase: "generation",
-                delta,
-                source: "chat.completion.chunk.delta",
-              });
+              tokenStream.append(delta);
             }
           }
           const text = stream_buffer.text();
-          this.emitTokenCompleted(context, { phase: "generation", chars: text.length });
+          tokenStream.complete(text.length);
           return this.generationFromText({
             text,
             raw: { streamed: true, provider: this.provider, chunks, model: modelReported },

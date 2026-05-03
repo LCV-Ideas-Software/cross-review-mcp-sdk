@@ -9,6 +9,48 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 _No entries yet._
 
+## [v02.06.00] - 2026-05-03
+
+**Token-delta event compaction (Codex+Gemini audit, item A) + bundled v2.5.0 format hotfix.** Empirical measurement of 253 historical sessions surfaced 96 282 of 98 664 events (97.6%) as `peer.token.delta` — by far the dominant noise in `events.ndjson` files. v2.6.0 coalesces streaming token deltas in the adapter layer before emitting the event, dramatically reducing event-log volume without changing the total content streamed. Same release also bundles the prettier format fix that was reported as the v2.5.0 CI #31 failure (format-only, no functional impact).
+
+### Added
+
+- **`TokenEventBuffer` class in `peers/base.ts`.** Coalesces deltas before emit. Flushes either when the buffered length crosses the byte threshold (default 1024 chars) OR when time-since-last-flush crosses the ms threshold (default 250 ms), whichever fires first. `complete()` flushes the remainder and emits `peer.token.completed`.
+- **`createTokenEventBuffer()` factory on `BasePeerAdapter`.** Each adapter call constructs the buffer once and uses `tokenStream.append(delta)` per chunk + `tokenStream.complete(text.length)` at end, replacing direct `emitTokenDelta` / `emitTokenCompleted` calls.
+- **Verbose escape hatch `CROSS_REVIEW_V2_TOKEN_DELTA_VERBOSE=1`.** When set, every chunk emits immediately (legacy v2.5.x chunk-level behavior). Useful for operators who want maximum token-stream observability.
+- **Two env knobs**: `CROSS_REVIEW_V2_TOKEN_DELTA_BYTES_THRESHOLD` (default 1024) and `CROSS_REVIEW_V2_TOKEN_DELTA_MS_THRESHOLD` (default 250) for tuning the coalesce thresholds without rebuild.
+
+### Fixed
+
+- **Prettier format on v2.5.0 files.** `CHANGELOG.md`, `scripts/smoke.ts`, and `src/core/orchestrator.ts` failed `npm run format:check` on v2.5.0 commit `cd0f040` (CI run #25283189042). Reformatted via `npm run format`. No functional changes.
+
+### Migrated
+
+- All 5 streaming adapters (`stub`, `openai`, `anthropic`, `gemini`, `deepseek`) — both the `call()` and `generate()` paths — now use `TokenEventBuffer` instead of direct `emitTokenDelta`/`emitTokenCompleted`. The legacy methods stay as primitives that the buffer flushes through.
+
+### Behavioral change (operator-visible)
+
+- Default-mode sessions emit ~10-20× fewer `peer.token.delta` events. A 50-chunk response that previously fired 50 events will fire ~3-5 coalesced events with the same total `chars` reported. Set `CROSS_REVIEW_V2_TOKEN_DELTA_VERBOSE=1` to restore legacy granularity.
+
+### Validation
+
+- **`npm run build`** clean.
+- **`npm run format:check`** clean (the v2.5.0 CI failure is now resolved).
+- **`npm run lint`** clean.
+- **`npm run smoke`** EXIT=0 with 16 PASS markers (13 carry-over + 3 new): `token_delta_event_compaction_test` verifies that 50 32-char chunks produce <50 delta events in default mode and exactly 50 in verbose mode; `token_delta_stall_timer_test` proves the setTimeout-based flush fires during stream stalls (Gemini R1 fix); `token_delta_complete_try_finally_test` proves `complete()` emits `peer.token.completed` even if final `flushDelta` throws (Codex R1 fix).
+- **Cross-review-v2 trilateral session `cc0a5fff-7e72-4daf-91c9-08079c269f64`** caller=claude, peers=codex+gemini+deepseek, 5 rounds, total cost ~$0.50 USD. Outcome: **converged unanimous_ready** (all 4 parties READY). R1 surfaced 2 real bugs that I fixed in v2.6.0 itself: Gemini caught the missing setTimeout for time-based flush during stream stalls; Codex caught the missing try/finally in `complete()`. R2-R5 closed evidentiary gaps for codex on the bundled prettier hotfix (literal full diff finally satisfied).
+
+### Deferred to v2.6.1+ (carried from v2.5.1 backlog)
+
+- Hard budget gate replication for fallback + moderation-recovery paths.
+- Smoke marker for `peer.format_recovery.budget_blocked` (stub `output_tokens=text.length` arithmetic prevents a clean budget window — needs a unit-test fixture).
+- Post-commit inspectable artifact for codex re-review of v2.5.0/v2.6.0 changes.
+
+### Deferred to v2.7+ (architectural)
+
+- **Evidence Broker** (Codex+Gemini #1): translate peer NEEDS_EVIDENCE asks into a structured per-round checklist that the next prompt explicitly addresses. Major design (changes session schema + prompt builders + status-parser).
+- **Per-provider health dashboard** (Codex+Gemini): READY rate, NEEDS_EVIDENCE rate, average cost, parser warnings per provider.
+
 ## [v02.05.00] - 2026-05-03
 
 **Operator-driven evidence-and-budget hardening pass + Codex/Gemini empirical-audit fold-ins.** Empirical analysis of 253 historical sessions (Codex audit 2026-05-03) surfaced concrete, measurable gaps that this release closes. Operator authorized a scope of 4 originals + 3 Codex fixes + 1 Gemini fix + 1 env knob; all shipped together with smoke coverage.
@@ -28,7 +70,7 @@ _No entries yet._
 
 - **Stub adapters no longer attribute real currency.** Codex measured `US$ 39,255` of phantom spend by stubs in the 253-session corpus (`source: "stub"` was missing; cost rates were applied to character-count tokens). `peers/stub.ts` now overrides every `PeerResult.cost` and `GenerationResult.cost` with a canonical zero-cost estimate tagged `source: "stub"` (added to the `CostEstimate.source` enum in `core/types.ts`). Token usage is preserved for telemetry. A test-only escape hatch `CROSS_REVIEW_V2_STUB_FORCE_REAL_COST=1` lets smoke validate `budget_exceeded` enforcement.
 - **Convergence reason surfaces per-peer `failure_class`.** The legacy `"one or more peers failed or did not respond"` (47 occurrences in the corpus, every one equally unactionable) is replaced with `"peers failed or did not respond: claude:network, gemini:rate_limit, codex:missing"`. The reason field stays a single string; granularity comes from enumerating peer + failure_class for every contributor.
-- **Stub `generate()` propagates FORCE_* test markers.** Pre-v2.5.0 the stub passed a 1200-char slice of the prompt as the synthetic body. The v2.5.0 contract directive injection lengthened the prompt header beyond the 1200-char window, breaking multi-round smoke tests that rely on FORCE_* marker continuity (e.g. budget-exceeded driving claude with FORCE_NOT_READY across 3 rounds). Fixed by detecting carried markers in the input prompt and prefixing them to the generated body.
+- **Stub `generate()` propagates FORCE\_\* test markers.** Pre-v2.5.0 the stub passed a 1200-char slice of the prompt as the synthetic body. The v2.5.0 contract directive injection lengthened the prompt header beyond the 1200-char window, breaking multi-round smoke tests that rely on FORCE\_\* marker continuity (e.g. budget-exceeded driving claude with FORCE_NOT_READY across 3 rounds). Fixed by detecting carried markers in the input prompt and prefixing them to the generated body.
 
 ### Behavioral changes (operator-visible)
 

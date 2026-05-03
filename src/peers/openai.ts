@@ -145,6 +145,11 @@ export class OpenAIAdapter extends BasePeerAdapter implements PeerAdapter {
         };
         if (this.shouldStreamTokens(context)) {
           const stream_buffer = new StreamBuffer(this.id);
+          const tokenStream = this.createTokenEventBuffer(
+            context,
+            "review",
+            "response.output_text.delta",
+          );
           let usage: TokenUsage | undefined;
           let modelReported: string | undefined;
           const stream = await this.client().responses.create(
@@ -155,11 +160,7 @@ export class OpenAIAdapter extends BasePeerAdapter implements PeerAdapter {
             if (event.type === "response.output_text.delta") {
               const delta = typeof event.delta === "string" ? event.delta : "";
               stream_buffer.append(delta);
-              this.emitTokenDelta(context, {
-                phase: "review",
-                delta,
-                source: "response.output_text.delta",
-              });
+              tokenStream.append(delta);
             } else if (event.type === "response.completed") {
               usage = usageFromOpenAI(event.response?.usage);
               modelReported = event.response?.model;
@@ -172,7 +173,7 @@ export class OpenAIAdapter extends BasePeerAdapter implements PeerAdapter {
             }
           }
           const text = stream_buffer.text();
-          this.emitTokenCompleted(context, { phase: "review", chars: text.length });
+          tokenStream.complete(text.length);
           return this.resultFromText({
             text,
             raw: { streamed: true, provider: this.provider, model: modelReported ?? this.model },
@@ -224,6 +225,11 @@ export class OpenAIAdapter extends BasePeerAdapter implements PeerAdapter {
         };
         if (this.shouldStreamTokens(context)) {
           const stream_buffer = new StreamBuffer(this.id);
+          const tokenStream = this.createTokenEventBuffer(
+            context,
+            "generation",
+            "response.output_text.delta",
+          );
           let usage: TokenUsage | undefined;
           let modelReported: string | undefined;
           const stream = await this.client().responses.create(
@@ -234,11 +240,7 @@ export class OpenAIAdapter extends BasePeerAdapter implements PeerAdapter {
             if (event.type === "response.output_text.delta") {
               const delta = typeof event.delta === "string" ? event.delta : "";
               stream_buffer.append(delta);
-              this.emitTokenDelta(context, {
-                phase: "generation",
-                delta,
-                source: "response.output_text.delta",
-              });
+              tokenStream.append(delta);
             } else if (event.type === "response.completed") {
               usage = usageFromOpenAI(event.response?.usage);
               modelReported = event.response?.model;
@@ -251,7 +253,7 @@ export class OpenAIAdapter extends BasePeerAdapter implements PeerAdapter {
             }
           }
           const text = stream_buffer.text();
-          this.emitTokenCompleted(context, { phase: "generation", chars: text.length });
+          tokenStream.complete(text.length);
           return this.generationFromText({
             text,
             raw: { streamed: true, provider: this.provider, model: modelReported ?? this.model },
