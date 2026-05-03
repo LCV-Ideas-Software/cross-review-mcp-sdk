@@ -9,6 +9,37 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 _No entries yet._
 
+## [v02.06.01] - 2026-05-03
+
+**Hard budget gate replication for fallback + moderation-recovery paths (v2.6.1 backlog item from v2.5.0/v2.6.0 deferral).** Pre-v2.6.1 only the format-recovery branch refused paid recoveries that would breach `max_session_cost_usd`; the fallback and moderation-safe-retry branches still proceeded silently after their `cost_alert` events. v2.6.1 brings them in line: each branch now evaluates `priorRoundsCost + estimate > sessionCostLimit` BEFORE the paid call and surfaces a `peer.fallback.budget_blocked` / `peer.moderation_recovery.budget_blocked` event + `failure_class: budget_preflight` failure if the projected spend would exceed the limit.
+
+### Added
+
+- **Hard budget gate at the fallback path** in `orchestrator.ts:callPeerForReview`. The gate runs after `peer.fallback.cost_alert` and before `fallback.call(prompt, context)`. Returns a `budget_preflight` `PeerFailure` if the gate fires; the fallback iteration continues with the next configured fallback adapter (or terminates if none remain).
+- **Hard budget gate at the moderation-recovery path** in `orchestrator.ts:callPeerForReview`. Mirrors the fallback gate but uses the moderation-safe prompt for the estimate (smaller than the original prompt because `buildModerationSafeReviewPrompt` caps the draft at 16 KiB instead of the full `max_draft_chars`).
+- **`format_recovery_hard_budget_gate_test` smoke marker** (deferred from v2.5.0 / v2.6.0 — finally landed). Uses a 15 KiB filler draft to make `recoveryEstimate ≈ preflightEstimate`, so the actual first-call cost (input × rate, no amplification) suffices to push `prior + first_call + recoveryEstimate` past the limit while preflight still passes. Verifies `peer.format_recovery.budget_blocked` event fires + `failure_class: budget_preflight` failure is recorded.
+
+### Behavioral change (operator-visible)
+
+- Sessions running close to `max_session_cost_usd` may now see fallback or moderation retries refused with `failure_class: budget_preflight` instead of silently overrunning. Sessions with adequate budget see no change. Operators monitoring `events.ndjson` will see new `peer.fallback.budget_blocked` and `peer.moderation_recovery.budget_blocked` event types when the gate fires.
+
+### Validation
+
+- **`npm run build`** clean.
+- **`npm run format:check`** clean.
+- **`npm run lint`** clean.
+- **`npm run smoke`** EXIT=0 with 17 PASS markers (16 carry-over from v2.6.0 + 1 new: `format_recovery_hard_budget_gate_test`).
+- **Cross-review-v2 trilateral session `f7c6b8b6-9f0f-4f80-b5e2-6686c709b9a7`** caller=claude, peers=codex+gemini+deepseek, 3 rounds. Outcome: gemini READY (verified, 3×), deepseek READY (verified, 3×), codex NEEDS_EVIDENCE (3×). Codex's residual is a meta-channel/evidence-packaging concern (acknowledged in R3 that the fallback-id symmetry argument is plausible; under-proves the moderation smoke-gap because moderationSafePrompt size depends on more than just the draft cap). Operator escalation chose **path A** (same as v2.5.0/v2.6.0 ships): ship with codex residual documented, v2.6.2 backlog tracks any post-commit refinements. Majority-verified READY (caller + 2/3 peers).
+
+### Smoke coverage gap (intentionally documented)
+
+- `peer.fallback.budget_blocked` and `peer.moderation_recovery.budget_blocked` smoke markers are NOT included. These two gates use the same arithmetic shape as preflight (`prior + estimate > limit`, same limit from `budgetLimit(config)`, same per-call estimate because prompt and adapter are identical), so the budget window where preflight passes AND the gate fires is mathematically empty in stub-driven smoke. The format-recovery gate is testable because it adds the already-incurred `currentPeerFirstCallCost`; fallback and moderation gates run BEFORE any peer-side cost is recorded. The gates are exercised in production where prior session totals accumulate over multiple rounds and actual provider costs vary from preflight estimates. Code review of `orchestrator.ts:callPeerForReview` validates the gate logic.
+
+### Deferred to v2.7+ (architectural, unchanged)
+
+- **Evidence Broker** (Codex+Gemini #1).
+- **Per-provider health dashboard** (Codex+Gemini).
+
 ## [v02.06.00] - 2026-05-03
 
 **Token-delta event compaction (Codex+Gemini audit, item A) + bundled v2.5.0 format hotfix.** Empirical measurement of 253 historical sessions surfaced 96 282 of 98 664 events (97.6%) as `peer.token.delta` — by far the dominant noise in `events.ndjson` files. v2.6.0 coalesces streaming token deltas in the adapter layer before emitting the event, dramatically reducing event-log volume without changing the total content streamed. Same release also bundles the prettier format fix that was reported as the v2.5.0 CI #31 failure (format-only, no functional impact).

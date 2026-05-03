@@ -656,6 +656,7 @@ export class CrossReviewOrchestrator {
             // emitted a cost alert; fallback + moderation-safe retry were
             // silent. Codex measured the gap empirically (only 2 of 11
             // observed paid recoveries surfaced an alert).
+            const fallbackEstimate = estimatedPeerRoundCost(this.config, [fallback.id], prompt);
             this.emit({
               type: "peer.fallback.cost_alert",
               session_id: context.session_id,
@@ -665,13 +666,64 @@ export class CrossReviewOrchestrator {
               data: {
                 from_model: adapter.model,
                 to_model: fallback.model,
-                estimated_extra_cost_usd: estimatedPeerRoundCost(
-                  this.config,
-                  [fallback.id],
-                  prompt,
-                ),
+                estimated_extra_cost_usd: fallbackEstimate,
               },
             });
+            // v2.6.1 (Gemini audit replication, 2026-05-03): hard budget gate
+            // BEFORE the fallback call. Pre-v2.6.1 the cost_alert was
+            // notification-only; fallback proceeded even when the fallback
+            // estimate would push the session over `max_session_cost_usd`.
+            // Now we refuse the fallback and surface a structured failure.
+            //
+            // callPeerForReview runs concurrently for each peer in a round
+            // (Promise.all in askPeers), so we cannot see other peers'
+            // in-flight costs from here. The conservative check uses prior
+            // rounds' total cost only; this may approve a fallback that
+            // would actually breach if multiple peers are simultaneously
+            // recovering, but that case is rare and would still trip the
+            // post-round `budgetExceeded` check in runUntilUnanimous.
+            const fallbackSessionLimit = budgetLimit(this.config);
+            const priorRoundsCostForFallback = (() => {
+              try {
+                return this.store.read(context.session_id).totals.cost.total_cost ?? 0;
+              } catch {
+                return 0;
+              }
+            })();
+            if (
+              fallbackEstimate != null &&
+              fallbackSessionLimit != null &&
+              priorRoundsCostForFallback + fallbackEstimate > fallbackSessionLimit
+            ) {
+              const message = `Fallback refused: ${fallback.model} for ${adapter.id} would push session cost from $${priorRoundsCostForFallback.toFixed(6)} to $${(priorRoundsCostForFallback + fallbackEstimate).toFixed(6)}, exceeding configured limit $${fallbackSessionLimit.toFixed(6)}.`;
+              this.emit({
+                type: "peer.fallback.budget_blocked",
+                session_id: context.session_id,
+                round: context.round,
+                peer: adapter.id,
+                message,
+                data: {
+                  from_model: adapter.model,
+                  to_model: fallback.model,
+                  estimated_extra_cost_usd: fallbackEstimate,
+                  current_session_cost_usd: priorRoundsCostForFallback,
+                  session_limit_usd: fallbackSessionLimit,
+                },
+              });
+              return {
+                adapter,
+                failure: {
+                  peer: adapter.id,
+                  provider: adapter.provider,
+                  model: adapter.model,
+                  failure_class: "budget_preflight",
+                  message,
+                  retryable: false,
+                  attempts: failure.attempts,
+                  latency_ms: 0,
+                },
+              };
+            }
             try {
               const fallbackResult = await fallback.call(prompt, context);
               const parserWarnings = [
@@ -735,20 +787,64 @@ export class CrossReviewOrchestrator {
       // v2.5.0 fix (Codex audit P3, 2026-05-03): mirror the format_recovery
       // pattern — emit a cost alert before the paid sanitized retry so
       // FinOps consumers see every chargeable round-trip.
+      const moderationRecoveryEstimate = estimatedPeerRoundCost(
+        this.config,
+        [adapter.id],
+        moderationSafePrompt,
+      );
       this.emit({
         type: "peer.moderation_recovery.cost_alert",
         session_id: context.session_id,
         round: context.round,
         peer: adapter.id,
         message: "Moderation-safe retry will make one additional provider call.",
-        data: {
-          estimated_extra_cost_usd: estimatedPeerRoundCost(
-            this.config,
-            [adapter.id],
-            moderationSafePrompt,
-          ),
-        },
+        data: { estimated_extra_cost_usd: moderationRecoveryEstimate },
       });
+      // v2.6.1 (Gemini audit replication, 2026-05-03): hard budget gate
+      // BEFORE the paid moderation-safe retry. Same conservative
+      // current-cost computation as the fallback gate (see comment
+      // there): only prior rounds, since callPeerForReview can't see
+      // other peers' in-flight costs in the same round.
+      const moderationRecoverySessionLimit = budgetLimit(this.config);
+      const priorRoundsCostForModeration = (() => {
+        try {
+          return this.store.read(context.session_id).totals.cost.total_cost ?? 0;
+        } catch {
+          return 0;
+        }
+      })();
+      if (
+        moderationRecoveryEstimate != null &&
+        moderationRecoverySessionLimit != null &&
+        priorRoundsCostForModeration + moderationRecoveryEstimate > moderationRecoverySessionLimit
+      ) {
+        const message = `Moderation-safe retry refused: would push session cost from $${priorRoundsCostForModeration.toFixed(6)} to $${(priorRoundsCostForModeration + moderationRecoveryEstimate).toFixed(6)}, exceeding configured limit $${moderationRecoverySessionLimit.toFixed(6)}.`;
+        this.emit({
+          type: "peer.moderation_recovery.budget_blocked",
+          session_id: context.session_id,
+          round: context.round,
+          peer: adapter.id,
+          message,
+          data: {
+            estimated_extra_cost_usd: moderationRecoveryEstimate,
+            current_session_cost_usd: priorRoundsCostForModeration,
+            session_limit_usd: moderationRecoverySessionLimit,
+          },
+        });
+        return {
+          adapter,
+          failure: {
+            peer: adapter.id,
+            provider: adapter.provider,
+            model: adapter.model,
+            failure_class: "budget_preflight",
+            message,
+            retryable: false,
+            attempts: failure.attempts,
+            latency_ms: 0,
+          },
+        };
+      }
 
       try {
         const recovered = await adapter.call(moderationSafePrompt, context);
