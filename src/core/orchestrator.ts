@@ -209,11 +209,64 @@ function summarizePriorRounds(meta: SessionMeta, config: AppConfig): string {
   return limitBlock(summary, config.prompt.max_history_chars);
 }
 
+// v2.14.0 (path-A structural fix): inline session-attached evidence
+// into peer-facing prompts. Caller anexa via `session_attach_evidence`
+// (already exists in v2.x); this block reads each attachment from disk
+// (via `SessionStore.readEvidenceAttachments`) and injects content
+// inline so peers see the full literal evidence (gates output, diff
+// hunks, log files) without the caller having to paste 200KB+ into the
+// MCP `draft` channel. Closes the recurring "meta-channel limit"
+// pattern (v2.5.0 + v2.13.0 ship-trilaterals) where codex demanded
+// literal evidence and the MCP caller→server channel could not carry
+// it. The server→peer channel is bounded only by the peer's context
+// window (Claude Opus 4.7 = 1M tokens; GPT-5.5 = 128K), much wider
+// than the MCP boundary. Per-attachment + total caps in
+// `config.prompt.max_attached_evidence_chars` keep prompts within
+// peer context budgets.
+function attachedEvidenceBlock(
+  attachments: Array<{
+    label: string;
+    relative_path: string;
+    content: string;
+    bytes: number;
+    truncated: boolean;
+    content_type?: string;
+  }>,
+): string[] {
+  if (!attachments.length) return [];
+  const lines: string[] = [
+    "## Attached Evidence",
+    "",
+    "The caller has attached the following files to the session via `session_attach_evidence`. The content below is read VERBATIM from the corresponding file in the server-side `evidence/` directory (no truncation unless explicitly noted). When reviewing the artifact, consult these attachments as the literal source of truth — they are NOT summarized.",
+    "",
+  ];
+  for (const att of attachments) {
+    const truncatedNote = att.truncated
+      ? ` (truncated to ${att.content.length} of ${att.bytes} bytes)`
+      : ` (${att.bytes} bytes)`;
+    const ctype = att.content_type ? ` content-type: \`${att.content_type}\`,` : "";
+    lines.push(
+      `### ${att.label} — \`${att.relative_path}\`${ctype}${truncatedNote}`,
+      "",
+      "```",
+      att.content,
+      "```",
+      "",
+    );
+  }
+  return lines;
+}
+
 function buildModerationSafeReviewPrompt(
   meta: SessionMeta,
   draft: string,
   config: AppConfig,
   reviewFocus?: string,
+  // v2.14.0: attachments deliberately omitted from moderation-safe path
+  // — by design this prompt is "compact + sanitized" so verbatim
+  // evidence file content (which may include flagged tokens that
+  // tripped the filter) does NOT bypass the moderation-safe contract.
+  // Operators using moderation-safe path are accepting reduced fidelity.
 ): string {
   return [
     "# Cross Review - Compact Moderation-Safe Review",
@@ -242,12 +295,21 @@ function buildReviewPrompt(
   draft: string,
   config: AppConfig,
   reviewFocus?: string,
+  attachments?: Array<{
+    label: string;
+    relative_path: string;
+    content: string;
+    bytes: number;
+    truncated: boolean;
+    content_type?: string;
+  }>,
 ): string {
   return [
     "# Cross Review - Review Round",
     "",
     ...sessionContractDirectives(),
     ...reviewFocusBlock(meta, config, reviewFocus),
+    ...(attachments ? attachedEvidenceBlock(attachments) : []),
     "## Original Task",
     safePromptText(meta.task, config.prompt.max_task_chars),
     "",
@@ -352,6 +414,14 @@ function buildRevisionPrompt(
   config: AppConfig,
   reviewFocus?: string,
   mode: import("./types.js").SessionMode = "ship",
+  attachments?: Array<{
+    label: string;
+    relative_path: string;
+    content: string;
+    bytes: number;
+    truncated: boolean;
+    content_type?: string;
+  }>,
 ): string {
   return [
     "# Cross Review - Revision For Convergence",
@@ -363,6 +433,7 @@ function buildRevisionPrompt(
     "",
     ...reviewFocusBlock(meta, config, reviewFocus),
     ...evidenceChecklistBlock(meta),
+    ...(attachments ? attachedEvidenceBlock(attachments) : []),
     "## Original Task",
     safePromptText(meta.task, config.prompt.max_task_chars),
     "",
@@ -652,6 +723,41 @@ interface PeerCallOutcome {
   failure?: PeerFailure;
 }
 
+// v2.14.0 (operator directive 2026-05-04): per-peer enable/disable error.
+// Thrown when a caller passes an explicit `lead_peer` or `peers` entry
+// that references a peer disabled via `CROSS_REVIEW_V2_PEER_<NAME>=off`.
+export class PeerDisabledError extends Error {
+  constructor(peer: PeerId) {
+    super(
+      `peer_disabled: ${peer} is disabled via CROSS_REVIEW_V2_PEER_${peer.toUpperCase()}=off; ` +
+        `enable it or pick a different peer.`,
+    );
+    this.name = "PeerDisabledError";
+  }
+}
+
+// v2.14.0: thrown from the orchestrator constructor when fewer than 2
+// peers are enabled — cross-review by definition needs at least 2
+// participating peers (otherwise it degenerates into a single peer
+// effectively self-reviewing the caller's submission).
+export class InsufficientEnabledPeersError extends Error {
+  constructor(enabled: PeerId[]) {
+    super(
+      `insufficient_enabled_peers: cross-review requires at least 2 enabled peers, ` +
+        `but only ${enabled.length} ${enabled.length === 1 ? "is" : "are"} enabled (${enabled.join(", ") || "(none)"}). ` +
+        `Set at least 2 of CROSS_REVIEW_V2_PEER_{CODEX,CLAUDE,GEMINI,DEEPSEEK} to "on".`,
+    );
+    this.name = "InsufficientEnabledPeersError";
+  }
+}
+
+// v2.14.0: returns the list of enabled peer ids in the canonical order
+// (codex, claude, gemini, deepseek) — used by the orchestrator to filter
+// `selectedPeers` to the runtime-enabled subset before lottery + dispatch.
+function enabledPeersFromConfig(config: AppConfig): PeerId[] {
+  return (Object.keys(config.peer_enabled) as PeerId[]).filter((peer) => config.peer_enabled[peer]);
+}
+
 export class CrossReviewOrchestrator {
   readonly store: SessionStore;
   adapters: Record<PeerId, PeerAdapter>;
@@ -662,6 +768,13 @@ export class CrossReviewOrchestrator {
   ) {
     this.store = new SessionStore(config);
     this.adapters = createAdapters(config);
+    // v2.14.0 (operator directive 2026-05-04): minimum-2-peers fail-fast
+    // at boot so a misconfigured workspace cannot silently degrade to a
+    // self-review or single-peer review. Throws before adapters are used.
+    const enabled = enabledPeersFromConfig(config);
+    if (enabled.length < 2) {
+      throw new InsufficientEnabledPeersError(enabled);
+    }
   }
 
   async probeAll(): Promise<PeerProbeResult[]> {
@@ -679,6 +792,260 @@ export class CrossReviewOrchestrator {
   // from rubber-stamping unclear cases. Failures (network/timeout/parse)
   // leave the item open; never crashes the pass. Returns one record per
   // item attempted (judged + skipped + failed).
+  // v2.14.0 (item 3): multi-peer judge consensus. Fires the judge call
+  // against MULTIPLE peers in parallel for each open evidence checklist
+  // item; the runtime promotes the item ONLY when all configured judge
+  // peers agree (every peer returns satisfied=true + confidence=verified
+  // + non-empty rationale + zero parser_warnings). Disagreement leaves
+  // the item open. Reduces single-judge bias risk before flipping
+  // operator-wide active-mode autowire to high-stakes scenarios.
+  //
+  // Cost-aware: each item costs N peer calls (parallel) instead of 1.
+  // Operators using consensus should set budgets accordingly.
+  //
+  // Aggregation rule: ALL peers must verified-satisfy the same item;
+  // any peer disagreeing keeps the item open + classifies as
+  // "consensus_disagreement". Failures from individual peers count as
+  // disagreement (we never promote on partial signal).
+  async runEvidenceChecklistJudgeConsensusPass(params: {
+    session_id: string;
+    judge_peers: PeerId[];
+    draft: string;
+    item_ids?: string[];
+    round?: number;
+    review_focus?: string;
+    mode?: "active" | "shadow";
+  }): Promise<{
+    promoted: Array<{ item_id: string; rationales: Record<string, string> }>;
+    skipped: Array<{
+      item_id: string;
+      reason:
+        | "not_open"
+        | "consensus_disagreement"
+        | "satisfied_but_unverified"
+        | "not_satisfied"
+        | "judge_failed";
+      per_peer: Record<
+        string,
+        {
+          satisfied?: boolean;
+          confidence?: Confidence;
+          rationale_empty?: boolean;
+          parser_warnings?: string[];
+          error?: string;
+        }
+      >;
+    }>;
+    consensus_decisions: Array<{
+      item_id: string;
+      unanimous_verified_satisfied: boolean;
+      per_peer_verdict: Record<string, "verified_satisfied" | "disagree" | "failed">;
+    }>;
+    judged_count: number;
+    capped: boolean;
+  }> {
+    if (!params.judge_peers.length) {
+      throw new Error("judge_peers_required: pass at least 1 judge peer");
+    }
+    if (params.judge_peers.length < 2) {
+      throw new Error(
+        "consensus_requires_at_least_2_peers: pass 2+ peers for consensus, or use runEvidenceChecklistJudgePass for single-peer.",
+      );
+    }
+    // Validate peers are enabled.
+    for (const peer of params.judge_peers) {
+      if (!this.config.peer_enabled[peer]) throw new PeerDisabledError(peer);
+    }
+    const meta = this.store.read(params.session_id);
+    const checklist = meta.evidence_checklist ?? [];
+    const cap = Math.max(1, Math.min(100, this.config.evidence_judge_autowire.max_items_per_pass));
+    const mode: "active" | "shadow" = params.mode ?? "active";
+    const filterIds = params.item_ids?.length ? new Set(params.item_ids) : null;
+    const candidates = checklist.filter((item) => {
+      if (filterIds && !filterIds.has(item.id)) return false;
+      return (item.status ?? "open") === "open";
+    });
+    const items = candidates.slice(0, cap);
+    const capped = candidates.length > cap;
+    const promoted: Array<{ item_id: string; rationales: Record<string, string> }> = [];
+    const skipped: Array<{
+      item_id: string;
+      reason:
+        | "not_open"
+        | "consensus_disagreement"
+        | "satisfied_but_unverified"
+        | "not_satisfied"
+        | "judge_failed";
+      per_peer: Record<
+        string,
+        {
+          satisfied?: boolean;
+          confidence?: Confidence;
+          rationale_empty?: boolean;
+          parser_warnings?: string[];
+          error?: string;
+        }
+      >;
+    }> = [];
+    const consensus_decisions: Array<{
+      item_id: string;
+      unanimous_verified_satisfied: boolean;
+      per_peer_verdict: Record<string, "verified_satisfied" | "disagree" | "failed">;
+    }> = [];
+    const judgmentRound = params.round ?? meta.rounds.length;
+    this.emit({
+      type: "session.evidence_judge_consensus_pass.started",
+      session_id: params.session_id,
+      round: judgmentRound,
+      message: `Multi-peer consensus judge pass started (${params.judge_peers.length} peers, ${items.length} items, mode=${mode}).`,
+      data: { judge_peers: params.judge_peers, mode, item_count: items.length, capped },
+    });
+    for (const item of items) {
+      const perPeerJudgments = await Promise.all(
+        params.judge_peers.map(async (peer) => {
+          const adapter = this.adapters[peer];
+          if (!adapter) {
+            return { peer, error: `unknown_judge_peer: ${peer}` };
+          }
+          try {
+            const judgment = await adapter.judgeEvidenceAsk(item.ask, params.draft, {
+              session_id: params.session_id,
+              round: judgmentRound,
+              task: meta.task,
+              signal: undefined,
+              stream: this.config.streaming.events,
+              stream_tokens: this.config.streaming.tokens,
+              emit: this.emit,
+            });
+            return { peer, judgment };
+          } catch (err) {
+            return {
+              peer,
+              error: err instanceof Error ? err.message : String(err),
+            };
+          }
+        }),
+      );
+      const perPeerVerdict: Record<string, "verified_satisfied" | "disagree" | "failed"> = {};
+      const perPeerDetails: Record<
+        string,
+        {
+          satisfied?: boolean;
+          confidence?: Confidence;
+          rationale_empty?: boolean;
+          parser_warnings?: string[];
+          error?: string;
+        }
+      > = {};
+      let unanimousVerifiedSatisfied = true;
+      const rationales: Record<string, string> = {};
+      for (const r of perPeerJudgments) {
+        if (r.error) {
+          perPeerVerdict[r.peer] = "failed";
+          perPeerDetails[r.peer] = { error: r.error };
+          unanimousVerifiedSatisfied = false;
+          continue;
+        }
+        // r.error was checked above; non-error path implies judgment present.
+        const j = r.judgment!;
+        const rationaleEmpty = !j.rationale || j.rationale.trim() === "";
+        const isVerifiedSatisfied =
+          j.satisfied === true &&
+          j.confidence === "verified" &&
+          !rationaleEmpty &&
+          j.parser_warnings.length === 0;
+        if (isVerifiedSatisfied) {
+          perPeerVerdict[r.peer] = "verified_satisfied";
+          rationales[r.peer] = j.rationale;
+        } else {
+          perPeerVerdict[r.peer] = "disagree";
+          unanimousVerifiedSatisfied = false;
+        }
+        perPeerDetails[r.peer] = {
+          satisfied: j.satisfied,
+          confidence: j.confidence,
+          rationale_empty: rationaleEmpty,
+          parser_warnings: j.parser_warnings,
+        };
+      }
+      consensus_decisions.push({
+        item_id: item.id,
+        unanimous_verified_satisfied: unanimousVerifiedSatisfied,
+        per_peer_verdict: perPeerVerdict,
+      });
+      if (unanimousVerifiedSatisfied && mode === "active") {
+        const result = this.store.markEvidenceItemAddressedByJudge(params.session_id, item.id, {
+          round: judgmentRound,
+          rationale: Object.values(rationales).join(" || "),
+          judge_peer: params.judge_peers[0],
+        });
+        if (result) {
+          promoted.push({ item_id: item.id, rationales });
+          this.emit({
+            type: "session.evidence_checklist_addressed",
+            session_id: params.session_id,
+            round: judgmentRound,
+            message: `Multi-peer consensus promoted ${item.id} (${params.judge_peers.join(", ")}).`,
+            data: {
+              ids: [item.id],
+              count: 1,
+              method: "judge",
+              judge_peer: params.judge_peers[0],
+              consensus_peers: params.judge_peers,
+            },
+          });
+        } else {
+          skipped.push({ item_id: item.id, reason: "not_open", per_peer: perPeerDetails });
+        }
+      } else if (unanimousVerifiedSatisfied && mode === "shadow") {
+        // Shadow mode: emit but don't mutate. Use the existing shadow
+        // event surface so the precision report (item 1) can include
+        // consensus runs in its corpus.
+        this.emit({
+          type: "session.evidence_judge_pass.shadow_decision",
+          session_id: params.session_id,
+          round: judgmentRound,
+          peer: params.judge_peers[0],
+          message: `Shadow consensus on ${item.id}: would promote (unanimous verified).`,
+          data: {
+            item_id: item.id,
+            would_promote: true,
+            satisfied: true,
+            confidence: "verified",
+            judge_peer: params.judge_peers[0],
+            consensus_peers: params.judge_peers,
+          },
+        });
+      } else {
+        skipped.push({
+          item_id: item.id,
+          reason: "consensus_disagreement",
+          per_peer: perPeerDetails,
+        });
+      }
+    }
+    this.emit({
+      type: "session.evidence_judge_consensus_pass.completed",
+      session_id: params.session_id,
+      round: judgmentRound,
+      message: `Multi-peer consensus judge pass completed: ${promoted.length} promoted, ${skipped.length} skipped.`,
+      data: {
+        judge_peers: params.judge_peers,
+        mode,
+        promoted_count: promoted.length,
+        skipped_count: skipped.length,
+        capped,
+      },
+    });
+    return {
+      promoted,
+      skipped,
+      consensus_decisions,
+      judged_count: items.length,
+      capped,
+    };
+  }
+
   async runEvidenceChecklistJudgePass(params: {
     session_id: string;
     judge_peer: PeerId;
@@ -1344,7 +1711,18 @@ export class CrossReviewOrchestrator {
   async askPeers(input: AskPeersInput): Promise<AskPeersOutput> {
     const caller = input.caller ?? "operator";
     const callerStatus = input.caller_status ?? "READY";
-    const selectedPeers = uniquePeers(input.peers?.length ? input.peers : [...PEERS]);
+    // v2.14.0 (operator directive 2026-05-04): explicit `peers` entries
+    // referencing a runtime-disabled peer are hard-rejected. Without an
+    // explicit list, default to the enabled subset (NOT the global
+    // PEERS) so a misconfigured workspace cannot silently re-enable a
+    // peer the operator turned off.
+    const requestedPeers = uniquePeers(input.peers?.length ? input.peers : [...PEERS]);
+    if (input.peers?.length) {
+      for (const peer of requestedPeers) {
+        if (!this.config.peer_enabled[peer]) throw new PeerDisabledError(peer);
+      }
+    }
+    const selectedPeers = requestedPeers.filter((peer) => this.config.peer_enabled[peer]);
     const missingFinancialVars = missingFinancialControlVars(this.config, selectedPeers);
     const session = input.session_id
       ? this.store.read(input.session_id)
@@ -1369,7 +1747,21 @@ export class CrossReviewOrchestrator {
       lead_peer: caller === "operator" ? undefined : caller,
     };
     const draftFile = this.store.saveDraft(session.session_id, roundNumber, input.draft);
-    const prompt = buildReviewPrompt(session, input.draft, this.config, input.review_focus);
+    // v2.14.0 (path-A structural fix): resolve session-attached evidence
+    // once per round and inline into the review prompt so peers see the
+    // full literal content (gates output, diff hunks, log files) without
+    // the caller having to paste 200KB+ into the MCP `draft` channel.
+    const attachments = this.store.readEvidenceAttachments(
+      session.session_id,
+      this.config.prompt.max_attached_evidence_chars,
+    );
+    const prompt = buildReviewPrompt(
+      session,
+      input.draft,
+      this.config,
+      input.review_focus,
+      attachments,
+    );
     const moderationSafePrompt = buildModerationSafeReviewPrompt(
       session,
       input.draft,
@@ -1870,7 +2262,13 @@ export class CrossReviewOrchestrator {
     // (missing peer, unknown peer) emits a single warning event and is
     // otherwise a no-op so a typo never crashes a paying review round.
     const autowire = this.config.evidence_judge_autowire;
-    if (autowire.mode === "shadow") {
+    // v2.14.0 (item 2): mode "active" promoted to first-class. Same
+    // dispatch as "shadow" but mode="active" passes through to
+    // runEvidenceChecklistJudgePass so verified-satisfied judgments
+    // call markEvidenceItemAddressedByJudge. Operator should ONLY flip
+    // to active after running session_judgment_precision_report (item 1)
+    // and confirming the judge_peer's F1 is acceptable for production.
+    if (autowire.mode === "shadow" || autowire.mode === "active") {
       const checklistAfter = this.store.read(session.session_id).evidence_checklist ?? [];
       const hasOpenItems = checklistAfter.some((item) => (item.status ?? "open") === "open");
       if (autowire.peer === undefined) {
@@ -1878,7 +2276,7 @@ export class CrossReviewOrchestrator {
           type: "session.evidence_judge_pass.autowire_skipped",
           session_id: session.session_id,
           round: round.round,
-          message: `Autowire enabled but CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER is missing or unknown (got "${autowire.configured_peer_raw}"); shadow pass skipped.`,
+          message: `Autowire enabled but CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER is missing or unknown (got "${autowire.configured_peer_raw}"); ${autowire.mode} pass skipped.`,
           data: { mode: autowire.mode, configured_peer: autowire.configured_peer_raw },
         });
       } else if (!hasOpenItems) {
@@ -1891,7 +2289,7 @@ export class CrossReviewOrchestrator {
             judge_peer: autowire.peer,
             draft: input.draft,
             round: round.round,
-            mode: "shadow",
+            mode: autowire.mode,
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -1899,7 +2297,7 @@ export class CrossReviewOrchestrator {
             type: "session.evidence_judge_pass.autowire_failed",
             session_id: session.session_id,
             round: round.round,
-            message: `Autowire shadow pass failed: ${message}`,
+            message: `Autowire ${autowire.mode} pass failed: ${message}`,
             data: { mode: autowire.mode, judge_peer: autowire.peer, error: message },
           });
         }
@@ -1909,7 +2307,7 @@ export class CrossReviewOrchestrator {
         type: "session.evidence_judge_pass.autowire_skipped",
         session_id: session.session_id,
         round: round.round,
-        message: `Autowire mode "${autowire.mode}" is not recognized; valid values are "off" and "shadow". Skipped.`,
+        message: `Autowire mode "${autowire.mode}" is not recognized; valid values are "off", "shadow" and "active". Skipped.`,
         data: { mode: autowire.mode },
       });
     }
@@ -1955,13 +2353,25 @@ export class CrossReviewOrchestrator {
     // session-aware fix from the v2.11.0 R-fix trilateral (deepseek catch
     // session 38c6c076).
     const callerForLottery: PeerId | "operator" = input.caller ?? "operator";
+    // v2.14.0: explicit `peers` entries referencing a disabled peer are
+    // rejected before any work; lead_peer is checked below. Without an
+    // explicit list, default to the enabled subset (NOT global PEERS).
     const requestedPeers = input.peers?.length ? input.peers : [...PEERS];
+    if (input.peers?.length) {
+      for (const peer of requestedPeers) {
+        if (!this.config.peer_enabled[peer]) throw new PeerDisabledError(peer);
+      }
+    }
+    if (input.lead_peer && !this.config.peer_enabled[input.lead_peer]) {
+      throw new PeerDisabledError(input.lead_peer);
+    }
+    const enabledRequestedPeers = requestedPeers.filter((peer) => this.config.peer_enabled[peer]);
     // Auto-recusal: drop the caller from the reviewer pool when caller is
     // a peer id. Operator caller is left as-is (operator is not a peer).
     const sessionPeers: PeerId[] =
       callerForLottery === "operator"
-        ? requestedPeers
-        : requestedPeers.filter((peer) => peer !== callerForLottery);
+        ? enabledRequestedPeers
+        : enabledRequestedPeers.filter((peer) => peer !== callerForLottery);
 
     let leadPeer: PeerId;
     if (callerForLottery === "operator") {
@@ -2219,7 +2629,18 @@ export class CrossReviewOrchestrator {
 
       if (round < effectiveMaxRounds) {
         const generation = await adapters[leadPeer].generate(
-          buildRevisionPrompt(session, draft, this.config, input.review_focus, sessionMode),
+          buildRevisionPrompt(
+            session,
+            draft,
+            this.config,
+            input.review_focus,
+            sessionMode,
+            // v2.14.0 (path-A): same attachment resolution as askPeers.
+            this.store.readEvidenceAttachments(
+              session.session_id,
+              this.config.prompt.max_attached_evidence_chars,
+            ),
+          ),
           {
             session_id: session.session_id,
             round,

@@ -210,6 +210,9 @@ const TOOL_NAMES = [
   "session_attach_evidence",
   "session_evidence_checklist_update",
   "session_evidence_judge_pass",
+  "session_evidence_judge_consensus_pass",
+  "session_judgment_precision_report",
+  "contest_verdict",
   "escalate_to_operator",
   "session_sweep",
   "session_finalize",
@@ -280,6 +283,10 @@ export async function main(): Promise<void> {
             configured_mode_raw: runtime.config.evidence_judge_autowire.configured_mode_raw,
             configured_peer_raw: runtime.config.evidence_judge_autowire.configured_peer_raw,
           },
+          // v2.14.0: per-peer enable/disable surface. Operators inspecting
+          // server_info see the resolved enabled/disabled state of each peer.
+          peer_enabled: runtime.config.peer_enabled,
+          peers_enabled_count: Object.values(runtime.config.peer_enabled).filter(Boolean).length,
           codeql_policy: "Default Setup on GitHub; no advanced workflow committed.",
           secrets_policy: "API keys are read from Windows environment variables only.",
         },
@@ -415,7 +422,7 @@ export async function main(): Promise<void> {
           peers: z
             .array(PeerSchema)
             .min(1)
-            .max(4)
+            .max(5)
             .default([...PEERS] as PeerId[]),
           response_format: ResponseFormatSchema,
         })
@@ -448,7 +455,7 @@ export async function main(): Promise<void> {
           peers: z
             .array(PeerSchema)
             .min(1)
-            .max(4)
+            .max(5)
             .default([...PEERS] as PeerId[]),
           response_format: ResponseFormatSchema,
         })
@@ -501,7 +508,7 @@ export async function main(): Promise<void> {
           peers: z
             .array(PeerSchema)
             .min(1)
-            .max(4)
+            .max(5)
             .default([...PEERS] as PeerId[]),
           max_rounds: z.number().int().min(1).max(1000).default(8),
           until_stopped: z.boolean().default(false),
@@ -545,7 +552,7 @@ export async function main(): Promise<void> {
           peers: z
             .array(PeerSchema)
             .min(1)
-            .max(4)
+            .max(5)
             .default([...PEERS] as PeerId[]),
           max_rounds: z.number().int().min(1).max(1000).default(8),
           until_stopped: z.boolean().default(false),
@@ -908,7 +915,7 @@ export async function main(): Promise<void> {
       inputSchema: z
         .object({
           session_id: SessionIdSchema,
-          judge_peer: z.enum(["codex", "claude", "gemini", "deepseek"]),
+          judge_peer: PeerSchema,
           draft: z.string().min(1).max(200_000),
           item_ids: z
             .array(
@@ -952,6 +959,153 @@ export async function main(): Promise<void> {
           round,
           review_focus,
           mode: shadow_mode ? "shadow" : "active",
+        }),
+        response_format,
+      ),
+  );
+
+  // v2.14.0 (item 3): multi-peer judge consensus pass. Fires the judge
+  // call against MULTIPLE peers in parallel for each open evidence
+  // checklist item; promotes the item ONLY when all configured judge
+  // peers agree (unanimous verified-satisfied + non-empty rationale +
+  // zero parser_warnings). Reduces single-judge bias risk before
+  // operator-wide active-mode autowire is enabled in high-stakes
+  // scenarios. Cost-aware: each item costs N peer calls in parallel.
+  server.registerTool(
+    "session_evidence_judge_consensus_pass",
+    {
+      title: "Run Evidence Judge Consensus Pass",
+      description:
+        "v2.14.0 — multi-peer consensus judge pass. Fires `judgeEvidenceAsk` against ALL `judge_peers` in parallel for each open checklist item; promotes (active mode) ONLY when all peers return verified-satisfied with non-empty rationale and zero parser_warnings. Disagreement leaves the item open with `reason=consensus_disagreement` and `per_peer` details. Shadow mode emits `session.evidence_judge_pass.shadow_decision` events with `consensus_peers` so the precision report tool sees consensus runs in its corpus. Requires at least 2 judge_peers; single-peer callers should use `session_evidence_judge_pass`. All judge_peers must be enabled (CROSS_REVIEW_V2_PEER_<NAME>=on).",
+      inputSchema: z
+        .object({
+          session_id: SessionIdSchema,
+          judge_peers: z.array(PeerSchema).min(2).max(5),
+          draft: z.string().min(1).max(200_000),
+          item_ids: z
+            .array(
+              z
+                .string()
+                .min(1)
+                .max(64)
+                .regex(/^[a-f0-9]+$/i, "item_id must be a hex string"),
+            )
+            .max(64)
+            .optional(),
+          round: z.number().int().min(1).max(10_000).optional(),
+          review_focus: z.string().min(1).max(4_000).optional(),
+          shadow_mode: z.boolean().optional(),
+          response_format: ResponseFormatSchema,
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({
+      session_id,
+      judge_peers,
+      draft,
+      item_ids,
+      round,
+      review_focus,
+      shadow_mode,
+      response_format,
+    }) =>
+      textResult(
+        await runtime.orchestrator.runEvidenceChecklistJudgeConsensusPass({
+          session_id,
+          judge_peers,
+          draft,
+          item_ids,
+          round,
+          review_focus,
+          mode: shadow_mode ? "shadow" : "active",
+        }),
+        response_format,
+      ),
+  );
+
+  // v2.14.0 (item 1): precision/recall/F1 of the shadow judge against
+  // empirical ground truth (whether peers raised the same ask in a
+  // subsequent round). Walks events.ndjson per session, correlates
+  // each `session.evidence_judge_pass.shadow_decision` event with the
+  // matching evidence_checklist item by id, and rolls up per
+  // judge_peer. Operator-triggered observability — DOES NOT mutate
+  // session state; safe to run on any session.
+  server.registerTool(
+    "session_judgment_precision_report",
+    {
+      title: "Judgment Precision Report",
+      description:
+        "v2.14.0 — compute precision/recall/F1 of the shadow judge against the empirical ground truth (whether peers raised the same ask in a subsequent round). Walks `session.evidence_judge_pass.shadow_decision` events across all sessions (or a single session via session_id, or filtered by judge peer / since timestamp), correlates each decision with the subsequent evidence_checklist resurfacing behavior, and returns per-peer TP/FP/TN/FN counts plus precision/recall/F1. Decisions whose item.last_round equals the judge round AND no later round exists are excluded as 'no ground truth' (we cannot tell if the ask would have come back). Operator uses this to decide whether to flip a peer from shadow to active mode (item 2 / v2.13).",
+      inputSchema: z
+        .object({
+          peer: PeerSchema.optional(),
+          since: z.string().min(1).max(64).optional(),
+          session_id: SessionIdSchema.optional(),
+          response_format: ResponseFormatSchema,
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ peer, since, session_id, response_format }) =>
+      textResult(
+        runtime.orchestrator.store.computeJudgmentPrecisionReport({
+          peer,
+          since,
+          session_id,
+        }),
+        response_format,
+      ),
+  );
+
+  // v2.14.0 (item 4): tribunal-colegiado contestation. Per the memory
+  // `project_cross_review_v2_tribunal_colegiado_model.md`, caller can
+  // formally contest a final verdict, opening a new deliberation cycle
+  // within the same autos. The original session is preserved (append-
+  // only); a new session is initialized with a structural reference
+  // back. Caller NOT_READY (contesta) → use this tool. Caller READY
+  // (acata) → use session_finalize as before.
+  server.registerTool(
+    "contest_verdict",
+    {
+      title: "Contest Verdict",
+      description:
+        "v2.14.0 — formally contest a final verdict and open a new deliberation cycle. Per the cross-review-v2 tribunal-colegiado model: caller READY (acata) → session_finalize as usual; caller NOT_READY (contesta) → contest_verdict. Stamps the original session's meta with a `contestation` record (timestamp + reason + original_outcome + new_session_id) and initializes a NEW session whose `contests_session_id` points back to the contested session, preserving the chain of custody append-only across sessions. The original session must be in a final state (converged/aborted/max-rounds); contesting an in-flight session throws cannot_contest_in_flight_session. Once contested, a session cannot be contested again (chain-of-custody invariant) — contest the LATEST session in the chain.",
+      inputSchema: z
+        .object({
+          session_id: SessionIdSchema,
+          reason: z.string().min(1).max(4_000),
+          new_task: z.string().min(1).max(SCHEMA_TASK_MAX_CHARS),
+          new_initial_draft: z.string().max(SCHEMA_INITIAL_DRAFT_MAX_CHARS).optional(),
+          new_caller: z.union([PeerSchema, z.literal("operator")]).optional(),
+          response_format: ResponseFormatSchema,
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ session_id, reason, new_task, new_initial_draft, new_caller, response_format }) =>
+      textResult(
+        runtime.orchestrator.store.contestVerdict({
+          session_id,
+          reason,
+          new_task,
+          new_initial_draft,
+          new_caller,
         }),
         response_format,
       ),
@@ -1095,16 +1249,27 @@ export async function main(): Promise<void> {
   setImmediate(() => {
     const autowire = runtime.config.evidence_judge_autowire;
     if (autowire.mode === "off" && autowire.configured_mode_raw === "") return;
-    if (autowire.mode !== "off" && autowire.mode !== "shadow") {
+    if (autowire.mode !== "off" && autowire.mode !== "shadow" && autowire.mode !== "active") {
       console.error(
-        `[cross-review-v2] notice: CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE="${autowire.configured_mode_raw}" is not recognized; valid values are "off" and "shadow". Auto-wire will be skipped.`,
+        `[cross-review-v2] notice: CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE="${autowire.configured_mode_raw}" is not recognized; valid values are "off", "shadow" and "active". Auto-wire will be skipped.`,
       );
       return;
     }
     if (autowire.mode === "off") return;
     if (!autowire.active) {
       console.error(
-        `[cross-review-v2] notice: CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE=shadow is set but CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER ("${autowire.configured_peer_raw}") is missing or not one of codex|claude|gemini|deepseek. Shadow auto-wire will be skipped per round; configure the peer to enable it.`,
+        `[cross-review-v2] notice: CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE=${autowire.mode} is set but CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER ("${autowire.configured_peer_raw}") is missing or not one of codex|claude|gemini|deepseek. ${autowire.mode === "active" ? "Active" : "Shadow"} auto-wire will be skipped per round; configure the peer to enable it.`,
+      );
+      return;
+    }
+    if (autowire.mode === "active") {
+      // v2.14.0 item 2: WARN loudly when active mode is on. Active
+      // mutates session state; operator must have validated the
+      // judge_peer's precision via session_judgment_precision_report
+      // before flipping. Surface the WARN every boot so an inadvertent
+      // env carry-over from a test run is visible.
+      console.error(
+        `[cross-review-v2] WARN: judge auto-wire active in ACTIVE mode via peer "${autowire.peer}" — verified-satisfied judgments WILL mutate evidence checklist state (markEvidenceItemAddressedByJudge). Run session_judgment_precision_report and confirm the judge's F1 is acceptable before relying on this in production. Set MODE=shadow to revert to non-mutating data collection.`,
       );
       return;
     }

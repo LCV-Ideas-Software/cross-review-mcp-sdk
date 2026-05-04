@@ -1,4 +1,10 @@
-export const PEERS = ["codex", "claude", "gemini", "deepseek"] as const;
+// v2.14.0 (item 5, operator directive 2026-05-04): Grok joined the
+// quarteto, making it a quinteto. Per `project_cross_review_v2_grok_integration_pending.md`,
+// xAI's Grok uses the OpenAI Responses API surface at base URL
+// `https://api.x.ai/v1`, default model `grok-4-latest`. Auth via
+// XAI_API_KEY (or GROK_API_KEY as fallback). Adapter at `peers/grok.ts`
+// inherits the same Responses API code path the OpenAI adapter uses.
+export const PEERS = ["codex", "claude", "gemini", "deepseek", "grok"] as const;
 export type PeerId = (typeof PEERS)[number];
 
 export const STATUSES = ["READY", "NOT_READY", "NEEDS_EVIDENCE"] as const;
@@ -398,6 +404,21 @@ export interface SessionMeta {
     usage: TokenUsage;
     cost: CostEstimate;
   };
+  // v2.14.0 (item 4): tribunal-colegiado contestation chain. Per the
+  // memory `project_cross_review_v2_tribunal_colegiado_model.md`:
+  // caller READY = acata; caller NOT_READY = contesta → novo ciclo.
+  // When this session was contested by the caller, the runtime
+  // populates `contestation`; when a new session was initialized to
+  // re-deliberate a previous session, the new session's
+  // `contests_session_id` points back. Both are append-only — once
+  // set, they preserve the chain of custody across sessions.
+  contestation?: {
+    contested_at: string;
+    reason: string;
+    original_outcome: SessionOutcome | null;
+    new_session_id: string;
+  };
+  contests_session_id?: string;
 }
 
 export interface ReviewRound {
@@ -453,6 +474,14 @@ export interface AppConfig {
     max_draft_chars: number;
     max_prior_rounds: number;
     max_peer_requests: number;
+    // v2.14.0 (path-A structural fix): cap on the total bytes of
+    // attached evidence inlined into peer-facing prompts. The caller
+    // anexa via `session_attach_evidence` (existing MCP tool); the
+    // attachedEvidenceBlock helper walks meta.evidence_files, reads
+    // each file from disk, and inlines up to this cap. Default 80_000
+    // bytes balances "enough room for codex's literal evidence asks"
+    // against "fits comfortably in the smaller peer context windows".
+    max_attached_evidence_chars: number;
   };
   max_output_tokens: number;
   streaming: {
@@ -471,6 +500,15 @@ export interface AppConfig {
   // call site re-reading env vars. The boot notice and the shadow path in
   // orchestrator.ts both use this struct.
   evidence_judge_autowire: EvidenceJudgeAutowireConfig;
+  // v2.14.0 (operator directive 2026-05-04): per-peer enable/disable
+  // surface so the operator can exclude empirically-weak peers per
+  // workspace without editing code. Set via env vars
+  // `CROSS_REVIEW_V2_PEER_<NAME>=on|off` (default `on`). Minimum 2
+  // peers enabled at boot — boot fails fast otherwise. Lottery and
+  // dispatch filter `selectedPeers` to the enabled set; an explicit
+  // `lead_peer` or `peers` referencing a disabled peer is hard-rejected
+  // at the orchestrator boundary.
+  peer_enabled: Record<PeerId, boolean>;
 }
 
 // v2.12.0: see AppConfig.evidence_judge_autowire. `mode` is widened to
@@ -478,7 +516,7 @@ export interface AppConfig {
 // boot notice still warns the operator, and `active` reports whether the
 // runtime will actually fire the shadow pass. `peer` is undefined when
 // the configured peer name is missing or not in PEERS.
-export type EvidenceJudgeAutowireMode = "off" | "shadow";
+export type EvidenceJudgeAutowireMode = "off" | "shadow" | "active";
 export interface EvidenceJudgeAutowireConfig {
   mode: EvidenceJudgeAutowireMode | string;
   peer: PeerId | undefined;
@@ -522,6 +560,50 @@ export interface ShadowJudgmentRollup {
   decisions_total: number;
   would_promote_total: number;
   by_judge_peer: Partial<Record<PeerId, ShadowJudgmentPeerStats>>;
+}
+
+// v2.14.0 (item 1): precision/recall/F1 of the shadow judge against
+// the empirical "did peer keep asking?" ground truth. Walks
+// `session.evidence_judge_pass.shadow_decision` events, correlates
+// each with the subsequent peer behavior on the same evidence
+// checklist item id (whether peers raised the same ask in a later
+// round), and rolls up per `judge_peer`.
+//
+// Classification (judge's prediction vs ground truth):
+//   - judge would_promote=true,  ask resurfaced → FP
+//   - judge would_promote=true,  ask not resurfaced → TP
+//   - judge would_promote=false, ask resurfaced → TN
+//   - judge would_promote=false, ask not resurfaced → FN
+//
+// Decisions whose item.last_round equals judge_round AND no later
+// round exists are excluded from the rollup (insufficient ground
+// truth — we can't tell whether the ask would have come back).
+export interface JudgmentPrecisionPeerStats {
+  judge_peer: PeerId;
+  decisions_total: number;
+  decisions_with_ground_truth: number;
+  decisions_skipped_no_ground_truth: number;
+  // Counts.
+  true_positive: number;
+  false_positive: number;
+  true_negative: number;
+  false_negative: number;
+  // Rates. null when denominator is 0.
+  precision: number | null;
+  recall: number | null;
+  f1: number | null;
+  by_confidence: Partial<Record<Confidence, { tp: number; fp: number; tn: number; fn: number }>>;
+}
+
+export interface JudgmentPrecisionReport {
+  generated_at: string;
+  peer_filter?: PeerId;
+  since_filter?: string;
+  session_filter?: string;
+  decisions_total: number;
+  decisions_with_ground_truth: number;
+  decisions_skipped_no_ground_truth: number;
+  by_judge_peer: Partial<Record<PeerId, JudgmentPrecisionPeerStats>>;
 }
 
 export interface ShadowJudgmentPeerStats {

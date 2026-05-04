@@ -9,6 +9,97 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 _No entries yet._
 
+## [v02.14.00] - 2026-05-04
+
+**v2.14.0 ships the 7 deferred items + per-peer toggle + path-A structural fix as a single minor bump (operator scope re-framing 2026-05-04).** v2.13.0 shipped only the lead drift fix. v2.14.0 ships the rest of the 6 v2.13 backlog items (precision report, active-mode autowire, multi-peer consensus, contest_verdict, Grok integration) plus the operator-added per-peer on/off toggle and the path-A structural fix. Cross-review ship-trilaterals will use `run_until_unanimous` again now that drift fix is live.
+
+### Added — Item 7: path-A structural fix (`attachedEvidenceBlock`)
+
+Closes the recurring "meta-channel limit" pattern (v2.5.0 + v2.13.0): codex demanded literal evidence proportional to ship size; the MCP `caller → server` channel (200KB) couldn't carry it. Now the caller anexa via existing `session_attach_evidence` MCP tool; orchestrator's `askPeers` and `runUntilUnanimous` resolve attachments via new `SessionStore.readEvidenceAttachments(sessionId, totalCapChars)` and inline them into peer prompts via `attachedEvidenceBlock` (between review_focus and original task). Files travel `disk → server prompt → peer context window` (much wider than MCP boundary, e.g. Claude Opus 4.7 = 1M tokens, GPT-5.5 = 128K).
+
+- New `AppConfig.prompt.max_attached_evidence_chars` (env `CROSS_REVIEW_V2_MAX_ATTACHED_EVIDENCE_CHARS`, default 80_000). Per-attachment cap at 60% of total; oldest-first ordering preserved; unreadable files silently skipped.
+- New helper `attachedEvidenceBlock(attachments)` renders `## Attached Evidence` block with per-attachment header (label, relative_path, content_type, byte size, truncation note) + verbatim content.
+- Wired into `buildReviewPrompt` + `buildRevisionPrompt`. Moderation-safe path deliberately excludes attachments (compact + sanitized contract).
+- 2 new smoke markers: `attached_evidence_inlined_in_peer_prompt_test` (R2 prompt contains verbatim attached content + `## Attached Evidence` header), `attached_evidence_cap_respected_test` (4×30k attachments × 80k cap → output ≤ 80k).
+
+### Added — Item 6: per-peer on/off env vars (operator directive 2026-05-04)
+
+`CROSS_REVIEW_V2_PEER_<NAME>=on|off` (CODEX/CLAUDE/GEMINI/DEEPSEEK/GROK). Default `on`. Recognized truthy: `on/true/1/yes/enabled`. Recognized falsy: `off/false/0/no/disabled`. Unrecognized → defaults to `on` with stderr warning. Minimum 2 enabled peers — orchestrator constructor throws `InsufficientEnabledPeersError` otherwise. Lottery + dispatch filter to the enabled subset; explicit `peers[]` or `lead_peer` referencing a disabled peer hard-rejected with `PeerDisabledError`.
+
+- New `AppConfig.peer_enabled: Record<PeerId, boolean>`.
+- New `loadPeerEnabledConfig()` parser in config.ts.
+- New error classes `PeerDisabledError` + `InsufficientEnabledPeersError` in orchestrator.
+- `server_info.peer_enabled` payload + `peers_enabled_count`.
+- 3 new smoke markers: `peer_enabled_env_parsed_test`, `peer_minimum_two_required_test`, `peer_dispatch_rejects_disabled_test`.
+
+### Added — Item 1: precision report MCP tool
+
+`session_judgment_precision_report({peer?, since?, session_id?})` walks `session.evidence_judge_pass.shadow_decision` events across sessions, correlates each with the matching evidence_checklist item's subsequent resurfacing behavior, and computes precision/recall/F1 per `judge_peer`. Operator uses this to validate a judge_peer's accuracy before flipping autowire to active mode (item 2).
+
+- Classification: TP (would_promote=true, ask not resurfaced); FP (would_promote=true, ask resurfaced); TN (would_promote=false, ask resurfaced); FN (would_promote=false, ask not resurfaced).
+- Decisions whose `item.last_round === judge_round` AND no later round exists are excluded as `decisions_skipped_no_ground_truth`.
+- New types `JudgmentPrecisionReport` + `JudgmentPrecisionPeerStats` (per-peer counts + by_confidence buckets + first/last_seen_at).
+- New `SessionStore.computeJudgmentPrecisionReport(opts)` method.
+- New MCP tool `session_judgment_precision_report` (read-only, idempotent).
+- 1 new smoke marker: `judgment_precision_report_test` (drives 3 askPeers rounds in shadow mode + asserts ≥1 TP).
+
+### Added — Item 2: active-mode autowire promoted to first-class
+
+`CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE` accepts `"active"` (was rejected as unknown in v2.12-v2.13). Active mode runs the judge AFTER aggregation/address-detection and PROMOTES verified-satisfied items via `markEvidenceItemAddressedByJudge`. Boot notice WARNS loudly when active mode is on (operator must have validated precision via item 1 first).
+
+- `EvidenceJudgeAutowireMode` type extended to `"off" | "shadow" | "active"`.
+- `evidence_judge_autowire.active` flag now `true` when mode is shadow OR active.
+- Boot notice differentiated WARN vs notice for active vs shadow.
+- 1 new smoke marker: `evidence_judge_autowire_active_promotes_test` (drives 2 askPeers rounds in active mode, asserts at least 1 item has `address_method="judge"`).
+
+### Added — Item 4: contest_verdict MCP action
+
+Per the tribunal-colegiado memory: caller READY = acata (use session_finalize); caller NOT_READY = contesta (use new `contest_verdict`). Stamps the original session's meta with a `contestation` record (timestamp + reason + original_outcome + new_session_id) and initializes a NEW session whose `contests_session_id` points back. Chain-of-custody append-only.
+
+- New SessionMeta fields `contestation` + `contests_session_id`.
+- New `SessionStore.contestVerdict(params)` method (validates final-state-only; rejects double-contestation; cross-links new session ↔ original).
+- New MCP tool `contest_verdict`.
+- 1 new smoke marker: `contest_verdict_chain_of_custody_test`.
+
+### Added — Item 3: multi-peer judge consensus
+
+New `runEvidenceChecklistJudgeConsensusPass({session_id, judge_peers, draft, mode?})` fires the judge against MULTIPLE peers in parallel; promotes ONLY when ALL peers return verified-satisfied + non-empty rationale + zero parser_warnings. Disagreement keeps the item open with `consensus_disagreement` reason + per_peer details. Reduces single-judge bias risk.
+
+- Cost-aware: each item costs N peer calls in parallel.
+- Requires ≥2 judge_peers; validates all are runtime-enabled.
+- New MCP tool `session_evidence_judge_consensus_pass`.
+- 1 new smoke marker: `judge_consensus_pass_test` (3 peers all verified-satisfied → promoted; disabled peer → PeerDisabledError).
+
+### Added — Item 5: Grok integration (5th peer)
+
+xAI's Grok joined the quinteto. Adapter at `src/peers/grok.ts` uses OpenAI Responses API surface at `https://api.x.ai/v1` (via OpenAI SDK with custom baseURL). Default model `grok-4-latest` (operator-corrected; NOT grok-4.3). Auth via `XAI_API_KEY` (canonical) with `GROK_API_KEY` fallback.
+
+- `PEERS = [..., "grok"]` (5 entries; was 4).
+- Config additions: `models.grok`, `fallback_models.grok`, `reasoning_effort.grok`, `api_keys.grok`, `cost_rates.grok`, `peer_enabled.grok`.
+- COST_RATE_ENV_PREFIX adds `grok: "CROSS_REVIEW_GROK"`.
+- model-selection.ts: PRIORITY[grok] = ["grok-4-latest", "grok-4", "grok-3-fast", "grok-3"]; new `grokModels(config)` lists models via `https://api.x.ai/v1`.
+- registry.ts: `GrokAdapter` for real calls + `StubAdapter("grok")` for stub mode.
+- **6 MCP host configs** (Claude Code, VS Code, Gemini Code Assist, Codex CLI, Antigravity, **Grok CLI** at `lcv-workspace\.grok\settings.json`) gain `GROK_API_KEY` + `CROSS_REVIEW_GROK_MODEL` + `CROSS_REVIEW_GROK_*_USD_PER_MILLION` env vars + the 5 `CROSS_REVIEW_V2_PEER_<NAME>=on` toggles (CODEX/CLAUDE/GEMINI/DEEPSEEK/GROK). Auth env var canonicalized to `GROK_API_KEY` (was `XAI_API_KEY` in initial v2.14 draft; operator correction 2026-05-04 — peer name is "grok", env var follows). The Grok CLI environment is NEW in v2.14.0 — workspace `AGENTS.md` updated from "Five MCP Environments" to "Six MCP Environments" + memory `reference_mcp_config_locations.md` updated accordingly.
+- MCP zod schemas: peer enums use `PeerSchema` (auto-tracks PEERS); `peers[]` array `.max(5)` (was `.max(4)`); `judge_peers[]` for consensus pass also `.max(5)`.
+- 1 new smoke marker: `grok_integration_test` (PEERS includes grok; loadConfig populates grok in all maps; 5-peer askPeers includes grok with `provider=stub-xai`; lottery occasionally picks grok).
+
+### Fixed — CodeQL alerts #5 + #6 (`js/insecure-temporary-file`, high severity)
+
+v2.13.0 attempted to fix these by adding `crypto.randomBytes(8)` entropy to `Date.now()`-based suffixes — but CodeQL did not recognize that pattern as a sanitizer. The alerts remained open after v2.13.0 push. v2.14.0 switches `smokeTmpDir(label)` to use `fs.mkdtempSync(prefix)`, the canonical CodeQL-recognized safe pattern. `mkdtempSync` creates the directory atomically with secure permissions and a kernel-injected unguessable suffix; both alerts close on next CodeQL scan.
+
+### Changed
+
+- `PEERS` constant expanded from 4 to 5 entries.
+- All MCP zod schemas with `.max(4)` peer arrays bumped to `.max(5)`.
+- All hardcoded `z.enum(["codex", "claude", "gemini", "deepseek"])` callsites in mcp/server.ts replaced with `PeerSchema = z.enum(PEERS)` (auto-tracks future peer additions).
+- Smoke harness setup loop iterates 5 providers (added GROK) for cost-rate env defaults.
+- Pre-existing relator lottery smoke markers updated for 5-peer pool: `relator_lottery_excludes_caller_test` (pool size 4 with caller excluded; operator caller pool size 5), `relator_lottery_uniform_distribution_test` (N=2000 over 4 candidates, expected 500 ±15%), `lead_peer_caller_match_rejected_test` (5-peer permutations).
+- `config_evidence_judge_autowire_parsed_test`: "active" no longer treated as unrecognized; uses "TURBO" as the unknown-mode fixture.
+
+### Smoke total
+
+51/51 PASS (was 41/41 in v2.13.0 → +10 new markers across items 1, 2, 3, 4, 5, 6, 7).
+
 ## [v02.13.00] - 2026-05-04
 
 **Lead_peer meta-review drift fix (item 1 of 6 v2.13 items).** Closes the v2.12 ship-blocker bug where `run_until_unanimous` lead generations on `task` phrasings starting with "Review v..." caused the lead_peer to interpret the call as meta-review (review of a review) instead of artifact-under-revision. Empirically observed in 2 v2.12 ship-trilaterals (sessions `1efd1930-...` and `25e0a8a6-...`) where ~$0.83 was burned across rounds in which the lead emitted structured `NEEDS_EVIDENCE` responses in place of refined drafts. Workaround in v2.12 was to use `ask_peers` (no lead-generation step). v2.13.0 fixes the underlying behavior so `run_until_unanimous` is reliable again — necessary precondition for shipping v2.13.1 (items 2-6) under the workspace HARD GATE.

@@ -16,6 +16,9 @@ const PROVIDERS: Record<PeerId, string> = {
   claude: "stub-anthropic",
   gemini: "stub-google",
   deepseek: "stub-deepseek",
+  // v2.14.0: stub provider id for the Grok adapter so smoke runs
+  // without the real xAI API key.
+  grok: "stub-xai",
 };
 
 // v2.5.0 fix (Codex audit P1, 2026-05-03): stub adapters must NEVER attribute

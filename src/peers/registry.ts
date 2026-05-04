@@ -3,6 +3,7 @@ import { PEERS } from "../core/types.js";
 import { AnthropicAdapter } from "./anthropic.js";
 import { DeepSeekAdapter } from "./deepseek.js";
 import { GeminiAdapter } from "./gemini.js";
+import { GrokAdapter } from "./grok.js";
 import { OpenAIAdapter } from "./openai.js";
 import { StubAdapter } from "./stub.js";
 
@@ -60,6 +61,8 @@ export function createAdapters(
       claude: new StubAdapter(config, "claude", modelOverrides.claude),
       gemini: new StubAdapter(config, "gemini", modelOverrides.gemini),
       deepseek: new StubAdapter(config, "deepseek", modelOverrides.deepseek),
+      // v2.14.0: Grok stub for offline / CI / budget-kill smoke runs.
+      grok: new StubAdapter(config, "grok", modelOverrides.grok),
     };
   }
 
@@ -68,6 +71,8 @@ export function createAdapters(
     claude: new AnthropicAdapter(config, modelOverrides.claude),
     gemini: new GeminiAdapter(config, modelOverrides.gemini),
     deepseek: new DeepSeekAdapter(config, modelOverrides.deepseek),
+    // v2.14.0: Grok via xAI's OpenAI-Responses-API surface.
+    grok: new GrokAdapter(config, modelOverrides.grok),
   };
 }
 

@@ -18,7 +18,7 @@ function expandHome(rawPath: string): string {
   return rawPath;
 }
 
-export const VERSION = "2.13.0";
+export const VERSION = "2.14.0";
 export const RELEASE_DATE = "2026-05-04";
 export const DEFAULT_MAX_OUTPUT_TOKENS = 20_000;
 const COST_RATE_ENV_PREFIX: Record<PeerId, string> = {
@@ -26,6 +26,10 @@ const COST_RATE_ENV_PREFIX: Record<PeerId, string> = {
   claude: "CROSS_REVIEW_ANTHROPIC",
   gemini: "CROSS_REVIEW_GEMINI",
   deepseek: "CROSS_REVIEW_DEEPSEEK",
+  // v2.14.0: Grok pricing via env (no hardcoded defaults; operator
+  // populates `CROSS_REVIEW_GROK_INPUT_USD_PER_MILLION` +
+  // `CROSS_REVIEW_GROK_OUTPUT_USD_PER_MILLION`).
+  grok: "CROSS_REVIEW_GROK",
 };
 
 const __filename = fileURLToPath(import.meta.url);
@@ -114,6 +118,10 @@ function keyForPeer(peer: PeerId): string | undefined {
       return envValue("GEMINI_API_KEY");
     case "deepseek":
       return envValue("DEEPSEEK_API_KEY");
+    // v2.14.0: Grok auth via GROK_API_KEY (canonical, operator-corrected
+    // 2026-05-04 — peer name is "grok" not "xai", env var follows).
+    case "grok":
+      return envValue("GROK_API_KEY");
   }
 }
 
@@ -166,6 +174,8 @@ export function loadConfig(): AppConfig {
       max_draft_chars: intEnv("CROSS_REVIEW_V2_MAX_DRAFT_CHARS", 40_000),
       max_prior_rounds: intEnv("CROSS_REVIEW_V2_MAX_PRIOR_ROUNDS", 5),
       max_peer_requests: intEnv("CROSS_REVIEW_V2_MAX_PEER_REQUESTS", 8),
+      // v2.14.0 (path-A structural fix): see AppConfig type docs.
+      max_attached_evidence_chars: intEnv("CROSS_REVIEW_V2_MAX_ATTACHED_EVIDENCE_CHARS", 80_000),
     },
     max_output_tokens: intEnv("CROSS_REVIEW_V2_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
     streaming: {
@@ -178,17 +188,21 @@ export function loadConfig(): AppConfig {
       claude: envValue("CROSS_REVIEW_ANTHROPIC_MODEL") || "claude-opus-4-7",
       gemini: envValue("CROSS_REVIEW_GEMINI_MODEL") || "gemini-3.1-pro-preview",
       deepseek: envValue("CROSS_REVIEW_DEEPSEEK_MODEL") || "deepseek-v4-pro",
+      // v2.14.0: default grok-4-latest (operator-corrected, NOT grok-4.3).
+      grok: envValue("CROSS_REVIEW_GROK_MODEL") || "grok-4-latest",
     },
     fallback_models: {
       codex: listEnv("CROSS_REVIEW_OPENAI_FALLBACK_MODELS"),
       claude: listEnv("CROSS_REVIEW_ANTHROPIC_FALLBACK_MODELS"),
       gemini: listEnv("CROSS_REVIEW_GEMINI_FALLBACK_MODELS"),
       deepseek: listEnv("CROSS_REVIEW_DEEPSEEK_FALLBACK_MODELS"),
+      grok: listEnv("CROSS_REVIEW_GROK_FALLBACK_MODELS"),
     },
     reasoning_effort: {
       codex: reasoningEffort("CROSS_REVIEW_OPENAI_REASONING_EFFORT", "xhigh"),
       claude: reasoningEffort("CROSS_REVIEW_ANTHROPIC_REASONING_EFFORT", "xhigh"),
       deepseek: reasoningEffort("CROSS_REVIEW_DEEPSEEK_REASONING_EFFORT", "max"),
+      grok: reasoningEffort("CROSS_REVIEW_GROK_REASONING_EFFORT", "xhigh"),
     },
     model_selection: {},
     api_keys: {
@@ -196,15 +210,50 @@ export function loadConfig(): AppConfig {
       claude: keyForPeer("claude"),
       gemini: keyForPeer("gemini"),
       deepseek: keyForPeer("deepseek"),
+      grok: keyForPeer("grok"),
     },
     cost_rates: {
       codex: costRate(COST_RATE_ENV_PREFIX.codex),
       claude: costRate(COST_RATE_ENV_PREFIX.claude),
       gemini: costRate(COST_RATE_ENV_PREFIX.gemini),
       deepseek: costRate(COST_RATE_ENV_PREFIX.deepseek),
+      grok: costRate(COST_RATE_ENV_PREFIX.grok),
     },
     evidence_judge_autowire: loadEvidenceJudgeAutowireConfig(),
+    peer_enabled: loadPeerEnabledConfig(),
   };
+}
+
+// v2.14.0 (operator directive 2026-05-04): per-peer enable/disable
+// parser. Default `on` for every peer. Recognized truthy values:
+// "on", "true", "1", "yes", "enabled". Recognized falsy: "off",
+// "false", "0", "no", "disabled". Unrecognized values fall back to
+// `on` with a stderr warning so a typo never silently disables a peer.
+// Boot-time minimum-2-enabled validation lives at the boundary
+// (orchestrator construction) — keeping the parser pure makes it easy
+// to test in isolation.
+function loadPeerEnabledConfig(): Record<PeerId, boolean> {
+  const peers: PeerId[] = ["codex", "claude", "gemini", "deepseek", "grok"];
+  const result = {} as Record<PeerId, boolean>;
+  for (const peer of peers) {
+    const envName = `CROSS_REVIEW_V2_PEER_${peer.toUpperCase()}`;
+    const raw = (envValue(envName) ?? "").trim().toLowerCase();
+    if (raw === "") {
+      result[peer] = true;
+      continue;
+    }
+    if (/^(on|true|1|yes|enabled)$/i.test(raw)) {
+      result[peer] = true;
+    } else if (/^(off|false|0|no|disabled)$/i.test(raw)) {
+      result[peer] = false;
+    } else {
+      console.error(
+        `[cross-review-v2] notice: ${envName}="${raw}" is not recognized; defaulting to "on". Recognized values: on/true/1/yes/enabled vs off/false/0/no/disabled.`,
+      );
+      result[peer] = true;
+    }
+  }
+  return result;
 }
 
 // v2.12.0: parse the judge auto-wire env vars into a typed struct that
@@ -220,7 +269,9 @@ function loadEvidenceJudgeAutowireConfig(): import("./types.js").EvidenceJudgeAu
   const peerKnown: PeerId[] = ["codex", "claude", "gemini", "deepseek"];
   const peer = (peerKnown as readonly string[]).includes(rawPeer) ? (rawPeer as PeerId) : undefined;
   const mode = rawMode === "" ? "off" : rawMode;
-  const active = mode === "shadow" && peer !== undefined;
+  // v2.14.0 (item 2): "active" promoted to first-class autowire mode.
+  // `active` flag is true when mode is shadow OR active AND peer valid.
+  const active = (mode === "shadow" || mode === "active") && peer !== undefined;
   // v2.12.0: preserve EXACT pre-v2.12 semantics. The legacy inline read
   // was `Number.parseInt(env ?? "8", 10) || 8` — this lets negative
   // values flow through (because `-5 || 8 === -5` in JS) so the

@@ -8,6 +8,7 @@ const DOCS = {
   claude: "https://platform.claude.com/docs/en/about-claude/models/overview",
   gemini: "https://ai.google.dev/gemini-api/docs/models",
   deepseek: "https://api-docs.deepseek.com/quick_start/pricing",
+  grok: "https://docs.x.ai/developers/models",
 } satisfies Record<PeerId, string>;
 
 const PRIORITY: Record<PeerId, string[]> = {
@@ -24,6 +25,10 @@ const PRIORITY: Record<PeerId, string[]> = {
   claude: ["claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6"],
   gemini: ["gemini-3.1-pro-preview", "gemini-2.5-pro"],
   deepseek: ["deepseek-v4-pro", "deepseek-v4-flash"],
+  // v2.14.0: Grok priority list. `grok-4-latest` per operator
+  // directive (NOT grok-4.3 which docs landing page mentions); the
+  // alias resolves to the latest stable Grok 4 build.
+  grok: ["grok-4-latest", "grok-4", "grok-3-fast", "grok-3"],
 };
 
 function envOverrideName(peer: PeerId): string {
@@ -36,6 +41,8 @@ function envOverrideName(peer: PeerId): string {
       return "CROSS_REVIEW_GEMINI_MODEL";
     case "deepseek":
       return "CROSS_REVIEW_DEEPSEEK_MODEL";
+    case "grok":
+      return "CROSS_REVIEW_GROK_MODEL";
   }
 }
 
@@ -159,6 +166,18 @@ async function deepSeekModels(config: AppConfig): Promise<ModelCandidate[]> {
   }));
 }
 
+// v2.14.0: Grok models via xAI's OpenAI-compatible API at api.x.ai/v1.
+async function grokModels(config: AppConfig): Promise<ModelCandidate[]> {
+  const apiKey = config.api_keys.grok;
+  if (!apiKey) return [];
+  const list = await new OpenAI({ apiKey, baseURL: "https://api.x.ai/v1" }).models.list();
+  return list.data.map((model) => ({
+    id: model.id,
+    source: "api" as const,
+    metadata: { owned_by: model.owned_by, created: model.created },
+  }));
+}
+
 async function candidatesForPeer(config: AppConfig, peer: PeerId): Promise<ModelCandidate[]> {
   switch (peer) {
     case "codex":
@@ -169,6 +188,8 @@ async function candidatesForPeer(config: AppConfig, peer: PeerId): Promise<Model
       return geminiModels(config);
     case "deepseek":
       return deepSeekModels(config);
+    case "grok":
+      return grokModels(config);
   }
 }
 

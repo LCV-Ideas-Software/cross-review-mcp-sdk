@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type {
   AppConfig,
+  Confidence,
   ConvergenceResult,
   ConvergenceScope,
   EvidenceChecklistItem,
@@ -21,6 +22,8 @@ import type {
   ReviewRound,
   ReviewStatus,
   SessionMeta,
+  JudgmentPrecisionPeerStats,
+  JudgmentPrecisionReport,
   ShadowJudgmentPeerStats,
   ShadowJudgmentRollup,
 } from "./types.js";
@@ -1101,6 +1104,249 @@ export class SessionStore {
       // v2.12.0: shadow_decision rollup. See aggregateShadowJudgments().
       shadow_judgment: this.aggregateShadowJudgments(sessionId),
     };
+  }
+
+  // v2.14.0 (item 1): compute precision/recall/F1 for the shadow judge
+  // against empirical ground truth (whether peers raised the same ask
+  // in a subsequent round). Walks events.ndjson per session, finds each
+  // `session.evidence_judge_pass.shadow_decision` event, looks up the
+  // matching item in `meta.evidence_checklist` by id, and classifies
+  // based on (would_promote x ask_resurfaced). Returns per-peer rollup.
+  computeJudgmentPrecisionReport(opts?: {
+    peer?: PeerId;
+    since?: string;
+    session_id?: string;
+  }): JudgmentPrecisionReport {
+    const sessions = opts?.session_id ? [this.read(opts.session_id)] : this.list();
+    const peerKnown: readonly PeerId[] = ["codex", "claude", "gemini", "deepseek"];
+    const byPeer: Partial<Record<PeerId, JudgmentPrecisionPeerStats>> = {};
+    let totalDecisions = 0;
+    let totalWithGroundTruth = 0;
+    let totalSkippedNoGT = 0;
+    const acc = (peer: PeerId): JudgmentPrecisionPeerStats => {
+      let entry = byPeer[peer];
+      if (!entry) {
+        entry = {
+          judge_peer: peer,
+          decisions_total: 0,
+          decisions_with_ground_truth: 0,
+          decisions_skipped_no_ground_truth: 0,
+          true_positive: 0,
+          false_positive: 0,
+          true_negative: 0,
+          false_negative: 0,
+          precision: null,
+          recall: null,
+          f1: null,
+          by_confidence: {},
+        };
+        byPeer[peer] = entry;
+      }
+      return entry;
+    };
+    for (const session of sessions) {
+      const events = this.readEvents(session.session_id);
+      const checklist = session.evidence_checklist ?? [];
+      const itemById = new Map<string, EvidenceChecklistItem>();
+      for (const item of checklist) itemById.set(item.id, item);
+      const maxRound = session.rounds.length;
+      for (const event of events) {
+        if (event.type !== "session.evidence_judge_pass.shadow_decision") continue;
+        const data = (event.data ?? {}) as {
+          item_id?: string;
+          would_promote?: boolean;
+          confidence?: Confidence;
+          judge_peer?: PeerId;
+        };
+        const judgePeer = data.judge_peer;
+        if (!judgePeer || !peerKnown.includes(judgePeer)) continue;
+        if (opts?.peer && judgePeer !== opts.peer) continue;
+        if (opts?.since && event.ts && event.ts < opts.since) continue;
+        const itemId = data.item_id;
+        if (!itemId) continue;
+        const item = itemById.get(itemId);
+        if (!item) continue;
+        const judgeRound = event.round ?? item.last_round;
+        const peerStats = acc(judgePeer);
+        peerStats.decisions_total += 1;
+        totalDecisions += 1;
+        // Ground truth: did the ask resurface AFTER the judge ran?
+        // last_round > judgeRound → resurfaced. last_round === judgeRound
+        // AND maxRound > judgeRound → not resurfaced (we have evidence
+        // peers had a chance to ask again and didn't). last_round ===
+        // judgeRound AND maxRound === judgeRound → no ground truth.
+        const resurfaced = item.last_round > judgeRound;
+        const peersHadChance = maxRound > judgeRound;
+        if (!resurfaced && !peersHadChance) {
+          peerStats.decisions_skipped_no_ground_truth += 1;
+          totalSkippedNoGT += 1;
+          continue;
+        }
+        peerStats.decisions_with_ground_truth += 1;
+        totalWithGroundTruth += 1;
+        const wouldPromote = data.would_promote === true;
+        let bucket: "tp" | "fp" | "tn" | "fn";
+        if (wouldPromote && !resurfaced) bucket = "tp";
+        else if (wouldPromote && resurfaced) bucket = "fp";
+        else if (!wouldPromote && resurfaced) bucket = "tn";
+        else bucket = "fn";
+        if (bucket === "tp") peerStats.true_positive += 1;
+        else if (bucket === "fp") peerStats.false_positive += 1;
+        else if (bucket === "tn") peerStats.true_negative += 1;
+        else peerStats.false_negative += 1;
+        if (data.confidence) {
+          let bc = peerStats.by_confidence[data.confidence];
+          if (!bc) {
+            bc = { tp: 0, fp: 0, tn: 0, fn: 0 };
+            peerStats.by_confidence[data.confidence] = bc;
+          }
+          bc[bucket] += 1;
+        }
+      }
+    }
+    // Compute precision/recall/f1 per peer.
+    for (const peer of Object.keys(byPeer) as PeerId[]) {
+      const stats = byPeer[peer];
+      if (!stats) continue;
+      const tp = stats.true_positive;
+      const fp = stats.false_positive;
+      const fn = stats.false_negative;
+      stats.precision = tp + fp > 0 ? tp / (tp + fp) : null;
+      stats.recall = tp + fn > 0 ? tp / (tp + fn) : null;
+      stats.f1 =
+        stats.precision != null && stats.recall != null && stats.precision + stats.recall > 0
+          ? (2 * stats.precision * stats.recall) / (stats.precision + stats.recall)
+          : null;
+    }
+    return {
+      generated_at: now(),
+      peer_filter: opts?.peer,
+      since_filter: opts?.since,
+      session_filter: opts?.session_id,
+      decisions_total: totalDecisions,
+      decisions_with_ground_truth: totalWithGroundTruth,
+      decisions_skipped_no_ground_truth: totalSkippedNoGT,
+      by_judge_peer: byPeer,
+    };
+  }
+
+  // v2.14.0 (path-A structural fix): resolve `meta.evidence_files[]`
+  // entries into in-memory contents for inlining into peer prompts.
+  // Reads each attachment from disk, applies a per-file cap (60% of the
+  // total cap to leave room for at least 1 other attachment + headers),
+  // accumulates into a total-cap, and returns whatever fits. Order
+  // preserved (oldest attachment first). Files that cannot be read
+  // (deleted, permission denied) are skipped silently — the caller
+  // sees only the metadata that survived. This closes the recurring
+  // "meta-channel limit" pattern (v2.5.0, v2.13.0) where codex demanded
+  // evidence the MCP `caller → server` 200KB channel could not carry:
+  // the file content already lives in `data_dir/sessions/<id>/evidence/`
+  // by the time we inline, so the only constraint is the peer model's
+  // context window — much larger than the MCP boundary.
+  readEvidenceAttachments(
+    sessionId: string,
+    totalCapChars: number,
+  ): Array<{
+    label: string;
+    relative_path: string;
+    content: string;
+    bytes: number;
+    truncated: boolean;
+    content_type?: string;
+  }> {
+    if (!Number.isFinite(totalCapChars) || totalCapChars <= 0) return [];
+    const meta = this.read(sessionId);
+    const files = meta.evidence_files ?? [];
+    if (!files.length) return [];
+    const perFileCap = Math.max(2_000, Math.floor(totalCapChars * 0.6));
+    const sessionDir = this.sessionDir(sessionId);
+    const result: Array<{
+      label: string;
+      relative_path: string;
+      content: string;
+      bytes: number;
+      truncated: boolean;
+      content_type?: string;
+    }> = [];
+    let used = 0;
+    for (const file of files) {
+      const absolutePath = path.resolve(sessionDir, file.path);
+      if (!this.isPathContained(sessionDir, absolutePath)) continue;
+      let raw: string;
+      try {
+        raw = fs.readFileSync(absolutePath, "utf8");
+      } catch {
+        continue;
+      }
+      const remaining = totalCapChars - used;
+      if (remaining <= 0) break;
+      const cap = Math.min(perFileCap, remaining);
+      const truncated = raw.length > cap;
+      const slice = truncated ? raw.slice(0, cap) : raw;
+      result.push({
+        label: file.label,
+        relative_path: file.path,
+        content: slice,
+        bytes: raw.length,
+        truncated,
+        content_type: file.content_type,
+      });
+      used += slice.length;
+    }
+    return result;
+  }
+
+  // v2.14.0 (item 4): contest a final verdict. Stamps the contested
+  // session's meta with the contestation record AND initializes a new
+  // session that references back. Validates the original session is
+  // in a final state (converged | aborted | max-rounds). Per the
+  // tribunal-colegiado memory, this is the canonical "caller NOT_READY
+  // → novo ciclo deliberativo dentro dos mesmos autos" surface — the
+  // original session is preserved (append-only); a new session opens
+  // for re-deliberation with a fresh task + initial_draft and a
+  // structural reference back to the contested session.
+  contestVerdict(params: {
+    session_id: string;
+    reason: string;
+    new_task: string;
+    new_initial_draft?: string;
+    new_caller?: PeerId | "operator";
+  }): { contested_meta: SessionMeta; new_session_id: string } {
+    const original = this.read(params.session_id);
+    if (!original.outcome) {
+      throw new Error(
+        `cannot_contest_in_flight_session: session ${params.session_id} has no outcome yet (still in flight). Wait for it to converge or finalize before contesting.`,
+      );
+    }
+    if (original.contestation) {
+      throw new Error(
+        `session_already_contested: session ${params.session_id} was already contested at ${original.contestation.contested_at} (new_session_id=${original.contestation.new_session_id}).`,
+      );
+    }
+    const newCaller: PeerId | "operator" = params.new_caller ?? "operator";
+    const newSession = this.init(params.new_task, newCaller, [], undefined);
+    // Cross-link new session → original.
+    this.withSessionLock(newSession.session_id, () => {
+      const m = this.read(newSession.session_id);
+      m.contests_session_id = params.session_id;
+      m.updated_at = now();
+      writeJson(this.metaPath(newSession.session_id), m);
+      return m;
+    });
+    // Stamp original with contestation record.
+    const contestedMeta = this.withSessionLock(params.session_id, () => {
+      const m = this.read(params.session_id);
+      m.contestation = {
+        contested_at: now(),
+        reason: params.reason,
+        original_outcome: m.outcome ?? null,
+        new_session_id: newSession.session_id,
+      };
+      m.updated_at = now();
+      writeJson(this.metaPath(params.session_id), m);
+      return m;
+    });
+    return { contested_meta: contestedMeta, new_session_id: newSession.session_id };
   }
 
   attachEvidence(
