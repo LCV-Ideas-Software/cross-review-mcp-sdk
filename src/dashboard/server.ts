@@ -113,6 +113,11 @@ function html(): string {
       <div class="muted" style="margin-bottom:8px">READY rate, NEEDS_EVIDENCE rate, custo médio e parser warnings por peer (todas as sessões salvas).</div>
       <div id="peer-health-body" class="muted">Carregando...</div>
     </section>
+    <section class="card" id="shadow-judgment" style="margin-top:14px">
+      <h2>Judge shadow (decisões observadas)</h2>
+      <div class="muted" style="margin-bottom:8px">Decisões emitidas pelo judge em modo shadow agregadas por peer julgador. Não muta estado — observabilidade pré v2.13.</div>
+      <div id="shadow-judgment-body" class="muted">Carregando...</div>
+    </section>
     <section class="grid" style="margin-top:14px">
       <article class="card"><strong>Dados</strong><p class="muted">${config.data_dir}</p></article>
       <article class="card"><strong>Logs</strong><p class="muted">${eventLog.path()}</p></article>
@@ -150,6 +155,34 @@ function html(): string {
       if (value == null || !Number.isFinite(value)) return '—';
       return (value * 100).toFixed(1) + '%';
     }
+    function renderShadowJudgment(rollup) {
+      if (!rollup || !rollup.decisions_total) {
+        return '<div class="muted">Nenhuma decisão shadow observada. Ative o judge shadow setando CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE=shadow + _PEER=codex.</div>';
+      }
+      const peers = Object.values(rollup.by_judge_peer || {}).filter(Boolean).sort((a, b) => b.decisions_total - a.decisions_total);
+      const head = '<thead><tr>' +
+        ['Judge peer','Decisões','Would promote','Skip (sat. unverified)','Skip (not satisfied)','Verified','Inferred','Unknown','Primeira','Última']
+          .map(h => '<th>' + h + '</th>').join('') + '</tr></thead>';
+      const body = '<tbody>' + peers.map(p => {
+        const conf = p.by_confidence || {};
+        const promoteRate = p.decisions_total ? (p.would_promote / p.decisions_total) : 0;
+        return '<tr>' +
+          '<td class="peer">' + escapeHtml(p.judge_peer) + '</td>' +
+          '<td class="num">' + p.decisions_total + '</td>' +
+          '<td class="num">' + p.would_promote + ' (' + pct(promoteRate) + ')</td>' +
+          '<td class="num">' + p.would_skip_satisfied_unverified + '</td>' +
+          '<td class="num">' + p.would_skip_not_satisfied + '</td>' +
+          '<td class="num">' + (conf.verified || 0) + '</td>' +
+          '<td class="num">' + (conf.inferred || 0) + '</td>' +
+          '<td class="num">' + (conf.unknown || 0) + '</td>' +
+          '<td class="num">' + escapeHtml(p.first_seen_at || '—') + '</td>' +
+          '<td class="num">' + escapeHtml(p.last_seen_at || '—') + '</td>' +
+          '</tr>';
+      }).join('') + '</tbody>';
+      const summary = '<p class="muted" style="margin:0 0 8px">Total: <strong>' + rollup.decisions_total + '</strong> decisão(ões) — ' +
+        rollup.would_promote_total + ' would_promote (' + pct(rollup.decisions_total ? rollup.would_promote_total / rollup.decisions_total : 0) + ')</p>';
+      return summary + '<table class="peer-health">' + head + body + '</table>';
+    }
     function renderPeerHealth(perPeer) {
       const peers = Object.values(perPeer || {}).filter(Boolean).sort((a, b) => b.results_total - a.results_total);
       if (!peers.length) return '<div class="muted">Nenhum resultado de peer registrado ainda.</div>';
@@ -182,6 +215,7 @@ function html(): string {
         ['Custo', money(metrics.total_cost.total_cost)],
       ].map(([label, value]) => \`<article class="card metric"><span>\${label}</span><strong>\${value}</strong></article>\`).join('');
       document.getElementById('peer-health-body').innerHTML = renderPeerHealth(metrics.per_peer_health);
+      document.getElementById('shadow-judgment-body').innerHTML = renderShadowJudgment(metrics.shadow_judgment);
     }
     async function refresh() {
       await refreshMetrics();

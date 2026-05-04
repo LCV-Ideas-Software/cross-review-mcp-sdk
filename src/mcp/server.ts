@@ -269,6 +269,17 @@ export async function main(): Promise<void> {
           prompt: runtime.config.prompt,
           max_output_tokens: runtime.config.max_output_tokens,
           streaming: runtime.config.streaming,
+          // v2.12.0: judge auto-wire is now a first-class observable. Operators
+          // checking `server_info` know whether shadow is collecting data,
+          // which peer is rated, and whether a typo invalidated the config.
+          evidence_judge_autowire: {
+            mode: runtime.config.evidence_judge_autowire.mode,
+            peer: runtime.config.evidence_judge_autowire.peer ?? null,
+            active: runtime.config.evidence_judge_autowire.active,
+            max_items_per_pass: runtime.config.evidence_judge_autowire.max_items_per_pass,
+            configured_mode_raw: runtime.config.evidence_judge_autowire.configured_mode_raw,
+            configured_peer_raw: runtime.config.evidence_judge_autowire.configured_peer_raw,
+          },
           codeql_policy: "Default Setup on GitHub; no advanced workflow committed.",
           secrets_policy: "API keys are read from Windows environment variables only.",
         },
@@ -1065,33 +1076,30 @@ export async function main(): Promise<void> {
       console.error(`[cross-review-v2] startup stale-session abort sweep error: ${message}`);
     }
   });
-  // v2.10.0: surface judge auto-wire misconfiguration at boot. Per
-  // operator request the runtime never throws on a stray env value (a
-  // typo must not break a paying review-host); we log a single notice
-  // so the operator notices the dead-letter case during real runs.
+  // v2.10.0 / v2.12.0: surface judge auto-wire misconfiguration at boot.
+  // Per operator request the runtime never throws on a stray env value (a
+  // typo must not break a paying review-host); we log a single notice so
+  // the operator notices the dead-letter case during real runs. Source of
+  // truth is `runtime.config.evidence_judge_autowire` (parsed by
+  // loadConfig); this notice no longer re-reads env vars.
   setImmediate(() => {
-    const rawMode = (process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE ?? "")
-      .trim()
-      .toLowerCase();
-    if (!rawMode || rawMode === "off") return;
-    if (rawMode !== "shadow") {
+    const autowire = runtime.config.evidence_judge_autowire;
+    if (autowire.mode === "off" && autowire.configured_mode_raw === "") return;
+    if (autowire.mode !== "off" && autowire.mode !== "shadow") {
       console.error(
-        `[cross-review-v2] notice: CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE="${rawMode}" is not recognized; valid values are "off" and "shadow". Auto-wire will be skipped.`,
+        `[cross-review-v2] notice: CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE="${autowire.configured_mode_raw}" is not recognized; valid values are "off" and "shadow". Auto-wire will be skipped.`,
       );
       return;
     }
-    const rawPeer = (process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER ?? "").trim();
-    const validPeer = (["codex", "claude", "gemini", "deepseek"] as const).includes(
-      rawPeer as PeerId,
-    );
-    if (!validPeer) {
+    if (autowire.mode === "off") return;
+    if (!autowire.active) {
       console.error(
-        `[cross-review-v2] notice: CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE=shadow is set but CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER ("${rawPeer}") is missing or not one of codex|claude|gemini|deepseek. Shadow auto-wire will be skipped per round; configure the peer to enable it.`,
+        `[cross-review-v2] notice: CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE=shadow is set but CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER ("${autowire.configured_peer_raw}") is missing or not one of codex|claude|gemini|deepseek. Shadow auto-wire will be skipped per round; configure the peer to enable it.`,
       );
       return;
     }
     console.error(
-      `[cross-review-v2] notice: judge auto-wire active in SHADOW mode via peer "${rawPeer}". Every askPeers round will fire a non-mutating judge pass; events session.evidence_judge_pass.shadow_decision are emitted per item.`,
+      `[cross-review-v2] notice: judge auto-wire active in SHADOW mode via peer "${autowire.peer}" (max_items_per_pass=${autowire.max_items_per_pass}). Every askPeers round will fire a non-mutating judge pass; events session.evidence_judge_pass.shadow_decision are emitted per item.`,
     );
   });
 }

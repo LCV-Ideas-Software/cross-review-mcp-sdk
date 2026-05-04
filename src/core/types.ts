@@ -460,6 +460,26 @@ export interface AppConfig {
   model_selection: Partial<Record<PeerId, ModelSelection>>;
   api_keys: Record<PeerId, string | undefined>;
   cost_rates: Partial<Record<PeerId, { input_per_million: number; output_per_million: number }>>;
+  // v2.12.0: judge auto-wire surfaced as first-class config so server_info,
+  // dashboard and orchestrator share one source of truth instead of each
+  // call site re-reading env vars. The boot notice and the shadow path in
+  // orchestrator.ts both use this struct.
+  evidence_judge_autowire: EvidenceJudgeAutowireConfig;
+}
+
+// v2.12.0: see AppConfig.evidence_judge_autowire. `mode` is widened to
+// string so an invalid env value (typo) survives without throwing — the
+// boot notice still warns the operator, and `active` reports whether the
+// runtime will actually fire the shadow pass. `peer` is undefined when
+// the configured peer name is missing or not in PEERS.
+export type EvidenceJudgeAutowireMode = "off" | "shadow";
+export interface EvidenceJudgeAutowireConfig {
+  mode: EvidenceJudgeAutowireMode | string;
+  peer: PeerId | undefined;
+  active: boolean;
+  max_items_per_pass: number;
+  configured_mode_raw: string;
+  configured_peer_raw: string;
 }
 
 // v2.8.0: per-peer health roll-up surfaced through the runtime metrics
@@ -484,6 +504,32 @@ export interface PeerHealthSummary {
   parser_warnings_total: number;
   rejected_total: number;
   failures_by_class: Partial<Record<PeerFailure["failure_class"], number>>;
+}
+
+// v2.12.0: rollup of `session.evidence_judge_pass.shadow_decision` events
+// across sessions. Operator observability: how many decisions has the
+// shadow pass produced, what is the would_promote rate per judge_peer,
+// what confidence distribution does the judge return. Prereq for v2.13's
+// precision-report tool that correlates these with subsequent peer
+// behavior.
+export interface ShadowJudgmentRollup {
+  decisions_total: number;
+  would_promote_total: number;
+  by_judge_peer: Partial<Record<PeerId, ShadowJudgmentPeerStats>>;
+}
+
+export interface ShadowJudgmentPeerStats {
+  judge_peer: PeerId;
+  decisions_total: number;
+  would_promote: number;
+  would_skip_satisfied_unverified: number;
+  would_skip_not_satisfied: number;
+  by_confidence: Partial<Record<Confidence, number>>;
+  // First and last shadow_decision event timestamps observed for this
+  // peer. Helps the operator gauge how long shadow has been collecting
+  // data.
+  first_seen_at: string | null;
+  last_seen_at: string | null;
 }
 
 export interface RuntimeMetrics {
@@ -511,4 +557,6 @@ export interface RuntimeMetrics {
   };
   // v2.8.0
   per_peer_health: Partial<Record<PeerId, PeerHealthSummary>>;
+  // v2.12.0
+  shadow_judgment: ShadowJudgmentRollup;
 }

@@ -18,7 +18,7 @@ function expandHome(rawPath: string): string {
   return rawPath;
 }
 
-export const VERSION = "2.11.0";
+export const VERSION = "2.12.0";
 export const RELEASE_DATE = "2026-05-03";
 export const DEFAULT_MAX_OUTPUT_TOKENS = 20_000;
 const COST_RATE_ENV_PREFIX: Record<PeerId, string> = {
@@ -203,6 +203,43 @@ export function loadConfig(): AppConfig {
       gemini: costRate(COST_RATE_ENV_PREFIX.gemini),
       deepseek: costRate(COST_RATE_ENV_PREFIX.deepseek),
     },
+    evidence_judge_autowire: loadEvidenceJudgeAutowireConfig(),
+  };
+}
+
+// v2.12.0: parse the judge auto-wire env vars into a typed struct that
+// server_info, the boot notice and the orchestrator share. Invalid
+// values do NOT throw — `mode` keeps the literal string for the boot
+// notice, `peer` is undefined when not in PEERS, `active` is true iff
+// the runtime will actually emit shadow_decision events.
+function loadEvidenceJudgeAutowireConfig(): import("./types.js").EvidenceJudgeAutowireConfig {
+  const rawMode = (process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE ?? "")
+    .trim()
+    .toLowerCase();
+  const rawPeer = (process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER ?? "").trim();
+  const peerKnown: PeerId[] = ["codex", "claude", "gemini", "deepseek"];
+  const peer = (peerKnown as readonly string[]).includes(rawPeer) ? (rawPeer as PeerId) : undefined;
+  const mode = rawMode === "" ? "off" : rawMode;
+  const active = mode === "shadow" && peer !== undefined;
+  // v2.12.0: preserve EXACT pre-v2.12 semantics. The legacy inline read
+  // was `Number.parseInt(env ?? "8", 10) || 8` — this lets negative
+  // values flow through (because `-5 || 8 === -5` in JS) so the
+  // orchestrator's `Math.max(1, Math.min(100, cap))` clamps -5 to 1, NOT 8.
+  // We don't use `intEnv` here because that helper has a `parsed > 0`
+  // filter, which would change the consumer's clamp result for negatives.
+  // codex R1 ship-review of v2.12.0 caught the divergence.
+  const rawCap = Number.parseInt(
+    process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_MAX_ITEMS_PER_PASS ?? "8",
+    10,
+  );
+  const maxItemsPerPass = Number.isFinite(rawCap) && rawCap !== 0 ? rawCap : 8;
+  return {
+    mode,
+    peer,
+    active,
+    max_items_per_pass: maxItemsPerPass,
+    configured_mode_raw: rawMode,
+    configured_peer_raw: rawPeer,
   };
 }
 

@@ -21,6 +21,8 @@ import type {
   ReviewRound,
   ReviewStatus,
   SessionMeta,
+  ShadowJudgmentPeerStats,
+  ShadowJudgmentRollup,
 } from "./types.js";
 import { mergeCost, mergeUsage } from "./cost.js";
 import { redact } from "../security/redact.js";
@@ -892,6 +894,77 @@ export class SessionStore {
     return recovered;
   }
 
+  // v2.12.0: walk session events.ndjson and aggregate
+  // `session.evidence_judge_pass.shadow_decision` events into a peer-keyed
+  // rollup. Operator observability: how many shadow decisions exist, what
+  // the would_promote rate looks like per judge_peer, what confidence
+  // distribution the judge returns. Walks the event log per session
+  // (O(events) per call); acceptable for v2.12 because the corpus is
+  // bounded (≤ a few hundred sessions historically) and the dashboard
+  // refreshes on demand.
+  aggregateShadowJudgments(sessionId?: string): ShadowJudgmentRollup {
+    const sessions = sessionId ? [this.read(sessionId)] : this.list();
+    const byPeer: Partial<Record<PeerId, ShadowJudgmentPeerStats>> = {};
+    let decisionsTotal = 0;
+    let wouldPromoteTotal = 0;
+    const peerKnown: readonly PeerId[] = ["codex", "claude", "gemini", "deepseek"];
+    for (const session of sessions) {
+      const events = this.readEvents(session.session_id);
+      for (const event of events) {
+        if (event.type !== "session.evidence_judge_pass.shadow_decision") continue;
+        const data = (event.data ?? {}) as {
+          judge_peer?: PeerId;
+          would_promote?: boolean;
+          satisfied?: boolean;
+          confidence?: "verified" | "inferred" | "unknown";
+        };
+        const judgePeer = data.judge_peer;
+        if (!judgePeer || !peerKnown.includes(judgePeer)) continue;
+        let entry = byPeer[judgePeer];
+        if (!entry) {
+          entry = {
+            judge_peer: judgePeer,
+            decisions_total: 0,
+            would_promote: 0,
+            would_skip_satisfied_unverified: 0,
+            would_skip_not_satisfied: 0,
+            by_confidence: {},
+            first_seen_at: null,
+            last_seen_at: null,
+          };
+          byPeer[judgePeer] = entry;
+        }
+        entry.decisions_total += 1;
+        decisionsTotal += 1;
+        if (data.would_promote === true) {
+          entry.would_promote += 1;
+          wouldPromoteTotal += 1;
+        } else if (data.satisfied === true) {
+          entry.would_skip_satisfied_unverified += 1;
+        } else {
+          entry.would_skip_not_satisfied += 1;
+        }
+        if (
+          data.confidence === "verified" ||
+          data.confidence === "inferred" ||
+          data.confidence === "unknown"
+        ) {
+          entry.by_confidence[data.confidence] = (entry.by_confidence[data.confidence] ?? 0) + 1;
+        }
+        const ts = event.ts ?? null;
+        if (ts) {
+          if (!entry.first_seen_at || ts < entry.first_seen_at) entry.first_seen_at = ts;
+          if (!entry.last_seen_at || ts > entry.last_seen_at) entry.last_seen_at = ts;
+        }
+      }
+    }
+    return {
+      decisions_total: decisionsTotal,
+      would_promote_total: wouldPromoteTotal,
+      by_judge_peer: byPeer,
+    };
+  }
+
   metrics(sessionId?: string): RuntimeMetrics {
     const sessions = sessionId ? [this.read(sessionId)] : this.list();
     const peerResults: RuntimeMetrics["peer_results"] = {};
@@ -1025,6 +1098,8 @@ export class SessionStore {
         generation_average: average(generationLatencies),
       },
       per_peer_health: perPeerHealth,
+      // v2.12.0: shadow_decision rollup. See aggregateShadowJudgments().
+      shadow_judgment: this.aggregateShadowJudgments(sessionId),
     };
   }
 

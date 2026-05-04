@@ -658,14 +658,10 @@ export class CrossReviewOrchestrator {
     if (!adapter) {
       throw new Error(`unknown_judge_peer: ${params.judge_peer}`);
     }
-    const cap = Math.max(
-      1,
-      Math.min(
-        100,
-        Number.parseInt(process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_MAX_ITEMS_PER_PASS ?? "8", 10) ||
-          8,
-      ),
-    );
+    // v2.12.0: cap lives on AppConfig.evidence_judge_autowire so server_info
+    // and the smoke harness see the same number. The hard floor/ceiling
+    // (1..100) stays here as a defensive guard against operator typos.
+    const cap = Math.max(1, Math.min(100, this.config.evidence_judge_autowire.max_items_per_pass));
     const mode: "active" | "shadow" = params.mode ?? "active";
     const filterIds = params.item_ids?.length ? new Set(params.item_ids) : null;
     const candidates = checklist.filter((item) => {
@@ -1793,34 +1789,25 @@ export class CrossReviewOrchestrator {
         });
       }
     }
-    // v2.10.0 — opt-in shadow-mode judge auto-wire. When the operator sets
-    // CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE=shadow + a valid peer in
-    // CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER, the runtime fires the
-    // judge pass against `input.draft` (the round's submitted draft) for
-    // items in `open` status AFTER aggregation + address detection ran.
+    // v2.10.0 / v2.12.0 — opt-in shadow-mode judge auto-wire. The
+    // configuration lives at `this.config.evidence_judge_autowire` (parsed
+    // once at boot in config.ts); call sites no longer re-read env vars.
     // Mode "shadow" emits session.evidence_judge_pass.shadow_decision events
     // per item but NEVER mutates state — operators collect empirical
-    // judgment-quality data before flipping to active in v2.11+. Misconfig
+    // judgment-quality data before flipping to active in v2.13+. Misconfig
     // (missing peer, unknown peer) emits a single warning event and is
     // otherwise a no-op so a typo never crashes a paying review round.
-    const autowireMode = (process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE ?? "off")
-      .trim()
-      .toLowerCase();
-    if (autowireMode === "shadow") {
-      const autowirePeerRaw = (
-        process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER ?? ""
-      ).trim();
-      const autowirePeer = autowirePeerRaw as PeerId;
-      const validPeer = (PEERS as readonly string[]).includes(autowirePeer);
+    const autowire = this.config.evidence_judge_autowire;
+    if (autowire.mode === "shadow") {
       const checklistAfter = this.store.read(session.session_id).evidence_checklist ?? [];
       const hasOpenItems = checklistAfter.some((item) => (item.status ?? "open") === "open");
-      if (!validPeer) {
+      if (autowire.peer === undefined) {
         this.emit({
           type: "session.evidence_judge_pass.autowire_skipped",
           session_id: session.session_id,
           round: round.round,
-          message: `Autowire enabled but CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER is missing or unknown (got "${autowirePeerRaw}"); shadow pass skipped.`,
-          data: { mode: autowireMode, configured_peer: autowirePeerRaw },
+          message: `Autowire enabled but CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER is missing or unknown (got "${autowire.configured_peer_raw}"); shadow pass skipped.`,
+          data: { mode: autowire.mode, configured_peer: autowire.configured_peer_raw },
         });
       } else if (!hasOpenItems) {
         // No open items → nothing to judge. Skip silently to avoid
@@ -1829,7 +1816,7 @@ export class CrossReviewOrchestrator {
         try {
           await this.runEvidenceChecklistJudgePass({
             session_id: session.session_id,
-            judge_peer: autowirePeer,
+            judge_peer: autowire.peer,
             draft: input.draft,
             round: round.round,
             mode: "shadow",
@@ -1841,17 +1828,17 @@ export class CrossReviewOrchestrator {
             session_id: session.session_id,
             round: round.round,
             message: `Autowire shadow pass failed: ${message}`,
-            data: { mode: autowireMode, judge_peer: autowirePeer, error: message },
+            data: { mode: autowire.mode, judge_peer: autowire.peer, error: message },
           });
         }
       }
-    } else if (autowireMode !== "off" && autowireMode !== "") {
+    } else if (autowire.mode !== "off") {
       this.emit({
         type: "session.evidence_judge_pass.autowire_skipped",
         session_id: session.session_id,
         round: round.round,
-        message: `Autowire mode "${autowireMode}" is not recognized; valid values are "off" and "shadow". Skipped.`,
-        data: { mode: autowireMode },
+        message: `Autowire mode "${autowire.mode}" is not recognized; valid values are "off" and "shadow". Skipped.`,
+        data: { mode: autowire.mode },
       });
     }
     let updated = this.store.read(session.session_id);

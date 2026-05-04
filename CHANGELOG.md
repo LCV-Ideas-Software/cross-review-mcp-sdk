@@ -9,6 +9,43 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 _No entries yet._
 
+## [v02.12.00] - 2026-05-03
+
+**Shadow auto-wire observability — turn on the data collection that v2.11.0 shipped but left dark.** v2.11.0 delivered the relator lottery (structural safeguard against self-review) and the shadow-mode auto-wire (non-mutating judge pass), but the env vars governing the shadow pass were never set in the 5 MCP host configs, so no `session.evidence_judge_pass.shadow_decision` events were ever emitted in production. Per advisor recommendation (2026-05-03), v2.12 keeps a tight scope: turn the shadow pass on, expose the config + the resulting decision corpus through `server_info` and the dashboard, and defer the LLM-based judgment-precision report to v2.13 once a real corpus exists. v2.12 also reaffirms the cross-review-v2 mental model as a `tribunal colegiado` (operator + codex framing 2026-05-03): caller = impetrante, lead_peer = juiz relator (sorteado em v2.11+), peers = colegiado, veredito contestável via novo ciclo append-only.
+
+### Added
+
+- **`AppConfig.evidence_judge_autowire`** + parser in `core/config.ts`. New typed struct `EvidenceJudgeAutowireConfig` with fields `mode: "off"|"shadow"|string`, `peer: PeerId|undefined`, `active: boolean`, `max_items_per_pass: number`, `configured_mode_raw: string`, `configured_peer_raw: string`. The `string` widening on `mode` lets a typo (e.g. `"ACTIVE"`) survive without throwing — the boot notice still warns the operator, and `active` reports whether the runtime will actually fire the shadow pass. Source of truth read once at boot; orchestrator + boot notice now share one parsed struct instead of three independent env reads.
+- **`server_info.evidence_judge_autowire`** payload — operators inspecting `server_info` see `mode`, `peer` (or `null` if invalid), `active` flag, `max_items_per_pass`, and the raw env values. Closes the v2.11.0 follow-up where shadow could be silently misconfigured (env empty / typo) and the only signal was a one-shot boot notice on stderr.
+- **`SessionStore.aggregateShadowJudgments(sessionId?)`** — walks `events.ndjson` per session, filters `session.evidence_judge_pass.shadow_decision` events, aggregates by `judge_peer` into `ShadowJudgmentPeerStats {decisions_total, would_promote, would_skip_satisfied_unverified, would_skip_not_satisfied, by_confidence: {verified, inferred, unknown}, first_seen_at, last_seen_at}`. Returns `ShadowJudgmentRollup {decisions_total, would_promote_total, by_judge_peer}`. Walks the event log per session (O(events) per call); acceptable for v2.12 because the corpus is bounded.
+- **`RuntimeMetrics.shadow_judgment`** — `metrics()` now returns the shadow-judgment rollup so MCP `session_metrics` and the dashboard share one observability surface.
+- **Dashboard panel "Judge shadow (decisões observadas)"** — sortable table grouped by `judge_peer` with decisions, would_promote count + rate, skipped (satisfied-but-unverified vs not-satisfied), confidence buckets (verified/inferred/unknown), first_seen_at, last_seen_at. Empty state hint: "Ative o judge shadow setando CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE=shadow + \_PEER=codex".
+- **Two new smoke markers** (mantém a base v2.11.0 → 35 + 2 = 37 markers):
+  - `config_evidence_judge_autowire_parsed_test` — verifies `loadConfig().evidence_judge_autowire` honors valid `MODE=shadow + PEER=codex`, rejects unknown peer (`peer=undefined`, `active=false`), preserves unknown mode raw (`mode="active"` for `MODE=ACTIVE`), and treats empty env as `mode="off"`.
+  - `metrics_shadow_judgment_rollup_test` — drives 2 askPeers rounds in shadow mode (1 generates the open ask, 1 forces FORCE_NEEDS_EVIDENCE + FORCE_JUDGE_SATISFIED so the judge runs against the open item with verified verdict), then asserts `aggregateShadowJudgments()` records ≥1 decision + ≥1 would_promote + ≥1 verified-confidence + populated first/last_seen_at; `metrics().shadow_judgment.decisions_total` matches direct call.
+
+### Changed
+
+- **`core/orchestrator.ts` autowire path** — replaced inline env reads with `this.config.evidence_judge_autowire`. The config struct is the single source of truth; future call sites read from one place.
+- **`core/orchestrator.ts:runEvidenceChecklistJudgePass` cap** — replaced inline `Number.parseInt(process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_MAX_ITEMS_PER_PASS ?? "8", 10)` with `this.config.evidence_judge_autowire.max_items_per_pass`. The 1..100 hard floor/ceiling stays as a defensive guard. **R1 ship-review note**: codex flagged a subtle behavior divergence in the initial v2.12 draft (parser used `intEnv()` which has a `parsed > 0` filter, changing the orchestrator's clamp result for negative env values from 1 to 8). Restored exact pre-v2.12 semantics: parser now uses `Number.parseInt(env ?? "8", 10)` directly (no positive-only filter), so negative values flow through and the orchestrator's `Math.max(1, Math.min(100, cap))` clamps them to 1 as before. Negative `MAX_ITEMS_PER_PASS` is still operator-typo territory; the fix is to preserve EXACT prior behavior, not to "improve" it silently.
+- **`mcp/server.ts` boot notice** — same migration as the orchestrator: notice now reads from `runtime.config.evidence_judge_autowire`. Behavior identical (single warning per boot when shadow misconfigured); implementation simpler.
+
+### Operational rollout
+
+- **`CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE=shadow` + `_PEER=codex`** added to the 5 MCP host configs (Claude Code, VS Code, Gemini Code Assist, ChatGPT Codex, Google Antigravity). codex chosen as judge because its peer-review rigor empirically surfaces real correctness defects (see `feedback_peer_review_rigor.md`); same rigor likely transfers to the judge role. Until shadow_decisions accumulate, the choice is provisional — v2.13 precision report will validate empirically and may swap to a different peer.
+
+### Mental model (codified, no code change)
+
+- **`tribunal colegiado` framing reaffirmed** (operator + codex 2026-05-03 refinement): caller = impetrante, `lead_peer` sorteado = juiz relator, peers = colegiado de juízes, votos = respostas estruturadas peer (READY/NOT_READY/NEEDS_EVIDENCE), veredito = síntese colegiado, contestação = caller pede novo ciclo deliberativo dentro dos mesmos autos (não reinício). Caller never votes as peer — only `READY` (acata) or `NOT_READY` (contesta). Memory `project_cross_review_v2_tribunal_colegiado_model.md` now carries the precise jurisprudential mapping table.
+
+### Deferred to v2.13+
+
+- **Active-mode auto-wire** — promote shadow's verified-satisfied verdicts to actual `markEvidenceItemAddressedByJudge` mutations. Premature without the precision report.
+- **Judgment precision report** (`session_judgment_precision_report` MCP tool) — walk sessions, correlate `shadow_decision` events with subsequent peer behavior, compute precision/recall/F1 per `judge_peer`. Prereq: sufficient shadow corpus (collected by v2.12 + a few weeks of real cross-review traffic).
+- **Multi-peer judge consensus** — fire shadow against 2 or 3 peers in parallel, count agreement. Cheap with shadow because no mutations; useful signal for active-mode confidence.
+- **Judge-induced retry on "unknown" confidence** — small polish; revisit after precision data.
+- **First-class `contest_verdict` MCP action** — formalize the `caller NOT_READY → novo ciclo` path so contestation preserves audit trail without manual session re-init.
+
 ## [v02.11.00] - 2026-05-03
 
 **Relator lottery (auto-recusal) + shadow-mode auto-wire of the v2.9.0 judge pass.** v2.11.0 bundles two items: (1) the relator lottery — a structural safeguard that prevents an agent from reviewing its own submission, modeled on judicial colegiados (operator directive 2026-05-03 after v2.10.0 wasted ~$2 USD across 4 trilaterals where caller=claude was also lead_peer=claude); and (2) the shadow-mode auto-wire originally planned for v2.10.0 (data-collection surface for the v2.9.0 judge pass before flipping to active mutation in v2.12+). The v2.10.0 release was rolled into v2.11.0 because v2.10's trilateral never converged validly under the broken self-review pattern.

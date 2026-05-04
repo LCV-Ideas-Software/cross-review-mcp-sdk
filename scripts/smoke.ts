@@ -2628,6 +2628,123 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   console.log("[smoke] relator_auto_recusal_filters_session_peers_test: PASS");
 }
 
+// v2.12.0 — config + server_info expose evidence_judge_autowire fields.
+// AppConfig.evidence_judge_autowire is the single source of truth read by
+// the boot notice, the orchestrator, and server_info. Verify the parser
+// honors valid mode+peer, rejects unknown peer, and treats unknown mode
+// as a passthrough so the boot notice can warn.
+{
+  const prevMode = process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE;
+  const prevPeer = process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER;
+  try {
+    process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE = "shadow";
+    process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER = "codex";
+    const valid = loadConfig();
+    assert.equal(valid.evidence_judge_autowire.mode, "shadow");
+    assert.equal(valid.evidence_judge_autowire.peer, "codex");
+    assert.equal(valid.evidence_judge_autowire.active, true);
+    assert.ok(valid.evidence_judge_autowire.max_items_per_pass >= 1);
+
+    process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE = "shadow";
+    process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER = "robotcat";
+    const badPeer = loadConfig();
+    assert.equal(badPeer.evidence_judge_autowire.mode, "shadow");
+    assert.equal(badPeer.evidence_judge_autowire.peer, undefined);
+    assert.equal(badPeer.evidence_judge_autowire.active, false);
+    assert.equal(badPeer.evidence_judge_autowire.configured_peer_raw, "robotcat");
+
+    process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE = "ACTIVE";
+    process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER = "codex";
+    const badMode = loadConfig();
+    assert.equal(badMode.evidence_judge_autowire.mode, "active");
+    assert.equal(badMode.evidence_judge_autowire.active, false);
+
+    delete process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE;
+    delete process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER;
+    const empty = loadConfig();
+    assert.equal(empty.evidence_judge_autowire.mode, "off");
+    assert.equal(empty.evidence_judge_autowire.peer, undefined);
+    assert.equal(empty.evidence_judge_autowire.active, false);
+    console.log("[smoke] config_evidence_judge_autowire_parsed_test: PASS");
+  } finally {
+    if (prevMode === undefined) delete process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE;
+    else process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE = prevMode;
+    if (prevPeer === undefined) delete process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER;
+    else process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER = prevPeer;
+  }
+}
+
+// v2.12.0 — metrics().shadow_judgment aggregates shadow_decision events
+// into a peer-keyed rollup. Drive 1 askPeers round in shadow mode that
+// produces shadow decisions, then verify the rollup counts decisions,
+// would_promote, and confidence buckets correctly.
+{
+  const prevMode = process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE;
+  const prevPeer = process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER;
+  process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE = "shadow";
+  process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER = "claude";
+  try {
+    const cfg = {
+      ...loadConfig(),
+      data_dir: path.join(os.tmpdir(), `cross-review-v2-shadow-rollup-${Date.now()}`),
+      budget: {
+        ...loadConfig().budget,
+        max_session_cost_usd: 10000,
+        preflight_max_round_cost_usd: 10000,
+        until_stopped_max_cost_usd: 10000,
+      },
+    };
+    // Mirror the holder pattern used by the main smoke harness: the
+    // orchestrator's emit callback must call `store.appendEvent` for the
+    // events.ndjson file to receive shadow_decision entries.
+    // aggregateShadowJudgments walks that file, so a no-op listener
+    // would leave the durable log empty.
+    const holder: { orch?: CrossReviewOrchestrator } = {};
+    const rollupOrch = new CrossReviewOrchestrator(cfg, (event) => {
+      holder.orch?.store.appendEvent(event);
+    });
+    holder.orch = rollupOrch;
+    const r1 = await rollupOrch.askPeers({
+      task: "Shadow rollup smoke R1",
+      draft: "FORCE_NEEDS_EVIDENCE",
+      caller: "operator",
+      peers: ["claude"],
+    });
+    await rollupOrch.askPeers({
+      session_id: r1.session.session_id,
+      task: "Shadow rollup smoke R2",
+      draft: "FORCE_NEEDS_EVIDENCE FORCE_JUDGE_SATISFIED",
+      caller: "operator",
+      peers: ["claude"],
+    });
+    const rollup = rollupOrch.store.aggregateShadowJudgments();
+    assert.ok(
+      rollup.decisions_total >= 1,
+      `aggregate must record at least 1 shadow decision (got ${rollup.decisions_total})`,
+    );
+    assert.ok(
+      rollup.would_promote_total >= 1,
+      `aggregate must record at least 1 would_promote (got ${rollup.would_promote_total})`,
+    );
+    const claudeStats = rollup.by_judge_peer.claude;
+    assert.ok(claudeStats, "by_judge_peer.claude must be populated");
+    assert.ok(claudeStats.decisions_total >= 1);
+    assert.ok(claudeStats.would_promote >= 1);
+    assert.ok((claudeStats.by_confidence.verified ?? 0) >= 1);
+    assert.ok(claudeStats.first_seen_at && claudeStats.last_seen_at);
+
+    const metrics = rollupOrch.store.metrics();
+    assert.ok(metrics.shadow_judgment, "metrics().shadow_judgment must be present");
+    assert.equal(metrics.shadow_judgment.decisions_total, rollup.decisions_total);
+    console.log("[smoke] metrics_shadow_judgment_rollup_test: PASS");
+  } finally {
+    if (prevMode === undefined) delete process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE;
+    else process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_MODE = prevMode;
+    if (prevPeer === undefined) delete process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER;
+    else process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER = prevPeer;
+  }
+}
+
 // v2.6.1 NOTE: smoke coverage for `peer.fallback.budget_blocked` and
 // `peer.moderation_recovery.budget_blocked` is intentionally NOT
 // included. These two gates use the same arithmetic shape as preflight
