@@ -9,6 +9,50 @@ standard `v00.00.00`; npm package versions remain SemVer.
 
 _No entries yet._
 
+## [v02.13.00] - 2026-05-04
+
+**Lead_peer meta-review drift fix (item 1 of 6 v2.13 items).** Closes the v2.12 ship-blocker bug where `run_until_unanimous` lead generations on `task` phrasings starting with "Review v..." caused the lead_peer to interpret the call as meta-review (review of a review) instead of artifact-under-revision. Empirically observed in 2 v2.12 ship-trilaterals (sessions `1efd1930-...` and `25e0a8a6-...`) where ~$0.83 was burned across rounds in which the lead emitted structured `NEEDS_EVIDENCE` responses in place of refined drafts. Workaround in v2.12 was to use `ask_peers` (no lead-generation step). v2.13.0 fixes the underlying behavior so `run_until_unanimous` is reliable again — necessary precondition for shipping v2.13.1 (items 2-6) under the workspace HARD GATE.
+
+This is the v2.13.0 sub-release; items 2-6 (precision report, active-mode auto-wire, multi-peer judge consensus, contest_verdict MCP action, Grok integration) ship in v2.13.1 once the `run_until_unanimous` cross-review surface is unblocked.
+
+### Added
+
+- **`SessionMode = "ship" | "review"` type** in `src/core/types.ts`. Disambiguates the caller's intent for `run_until_unanimous` and `session_start_unanimous`. `ship` (default) — `initial_draft` is the artifact under refinement, lead_peer produces a NEW REVISED VERSION as prose. `review` — `initial_draft` is the review subject, lead may emit structured responses (preserves v2.12 behavior for callers who want it).
+- **`mode: SessionMode` parameter on `RunUntilUnanimousInput`** + zod schemas for `run_until_unanimous` and `session_start_unanimous` MCP tools. Default `"ship"`.
+- **`leadShipModeDirective()`** prompt block injected into `buildRevisionPrompt` and `buildInitialDraftPrompt` when `mode === "ship"`. Codifies for the lead: "you are the relator producing a refined artifact (prose), NOT a peer reviewer voting; do NOT start your output with `READY`/`NOT_READY`/`NEEDS_EVIDENCE`; do NOT emit a JSON object with a `status` field; output only the revised artifact text".
+- **`detectLeadDrift(generationText)` helper** + `LEAD_DRIFT_PATTERN` regex (`/^\s*[{`'"]?\s\*"?(READY|NOT_READY|NEEDS_EVIDENCE)\b/`) scanning the first 200 chars. Returns `true` when the lead's output starts with a structured peer-review status keyword — meta-review drift signature.
+- **`session.lead_drift_detected` event** — fires once per drifted lead generation. Data: `{lead_peer, round_kind: "initial-draft" | "revision", consecutive_drifts (revision only), first_chars: <first 100 chars>}`. Operator-visible signal that the lead misread the call as meta-review.
+- **Drift-tolerance gate**: 2 consecutive drifts on the revision path abort the session with `outcome: "aborted"` + `outcome_reason: "lead_meta_review_drift"`. A single drift preserves the prior `draft` for the next round (does NOT replace it with the lead's meta-review output), so the round loop continues with the artifact peers were actually reviewing. The drift counter resets to 0 when a non-drifted revision is observed.
+- **Initial-draft drift handling**: when no `initial_draft` is provided AND the lead's INITIAL generation drifts, the session aborts immediately (no prior draft to fall back to).
+- **`mode === "review"` opt-out**: drift detection runs only when `mode === "ship"`. Callers who explicitly request review semantics keep the v2.12 behavior (structured responses accepted).
+- **`FORCE_DRIFT` stub marker** in `src/peers/stub.ts`. When the prompt contains `FORCE_DRIFT`, `StubAdapter.generate()` prepends `NEEDS_EVIDENCE\n\nsummary: ...` to its output so smoke tests can drive the drift detector deterministically.
+- **2 new smoke markers** (39/39 PASS = 37 carry-over from v2.12.0 + 2 new):
+  - `lead_drift_detected_test` — drives `runUntilUnanimous({lead=claude, peers=[claude, codex], task with FORCE_DRIFT + FORCE_NEEDS_EVIDENCE, initial_draft, max_rounds=4})`. Reviewer codex emits NEEDS_EVIDENCE per round (loop alive); lead claude generates 2 consecutive drifts. Asserts (a) ≥1 `session.lead_drift_detected` event with `lead_peer="claude"`; (b) `outcome=aborted` + `outcome_reason=lead_meta_review_drift`.
+  - `lead_drift_review_mode_skipped_test` — same setup with `mode: "review"`. Asserts ZERO drift events fire (detection disabled in review mode).
+
+### Changed
+
+- **`buildRevisionPrompt` + `buildInitialDraftPrompt` signatures** — now take optional `mode: SessionMode` parameter (default `"ship"` for backwards-compatibility). Other callers of these functions in the orchestrator are unaffected because the default preserves prior behavior.
+
+### Fixed (codex+gemini R1 ship-review catch + CodeQL alerts)
+
+- **Drift detection regex hardening (codex+gemini R1 + codex+deepseek R2 catches).** The initial v2.13.0 draft had a single `LEAD_DRIFT_PATTERN` matching only the keyword-prefix shape (`NEEDS_EVIDENCE\n...`). **R1 catch (codex+gemini)**: regex would NOT match raw JSON drift `{"status":"NEEDS_EVIDENCE","summary":"..."}`. R-fix1 added a leading-brace-anchored JSON pattern. **R2 catch (codex+deepseek)**: that JSON pattern still missed markdown-fenced JSON drift (` ```json\n{...}\n``` `), a common LLM output shape. R-fix2 replaced the brace-anchored pattern with `LEAD_DRIFT_PATTERN_STATUS_FIELD = /["']?status["']?\s*:\s*["'](READY|NOT_READY|NEEDS_EVIDENCE)\b/i` — scans for the status key/value pair ANYWHERE in the 200-char window, no leading-brace anchor. Catches raw JSON, markdown-fenced JSON, JSON-LD, and any wrapper. False-positive risk capped because the value MUST be one of READY|NOT_READY|NEEDS_EVIDENCE (a draft mentioning "status bar" doesn't match). New stub markers `FORCE_DRIFT_JSON` + `FORCE_DRIFT_MD` emit raw and markdown-fenced JSON respectively. New smoke markers `lead_drift_json_detected_test` + `lead_drift_md_detected_test` verify both shapes (with first_chars assertions proving the drift event captures verbatim shape). Total smoke = 41/41 PASS.
+- **CodeQL alerts #5 + #6 (`js/insecure-temporary-file`, high severity).** scripts/smoke.ts had ~25 `path.join(os.tmpdir(), cross-review-v2-...-${Date.now()})` constructions; `Date.now()` is predictable, so an attacker could pre-create a file at the predictable path before the smoke harness writes there (TOCTOU). Fix: new helper `smokeTmpDir(label)` using `crypto.randomBytes(8).toString("hex")` for unguessable suffix; bulk-refactored every call site. Closes both CodeQL alerts.
+
+### Workaround used to ship v2.13.0 itself
+
+Because the bug being fixed is in `run_until_unanimous`, this v2.13.0 ship review uses `ask_peers` directly (the documented v2.12 workaround). After v2.13.0 ships and the runtime reloads, subsequent ships (including v2.14.0+) can use `run_until_unanimous` again with `mode: "ship"` enabled by default.
+
+### Trilateral outcome: majority-verified READY (path A; cross-review-v2 session `c213630b-0f29-4ac1-8aa5-daf23f2cbc3c`, 5 rounds, ~$0.89)
+
+R5 final state: caller=claude READY + gemini READY (verified) + deepseek READY (verified) + codex NEEDS_EVIDENCE (verified, 3 asks). **75% verified READY** (3 of 4 colegiado parties). Codex's residual asks were evidence-presentation only (paste full smoke output verbatim, paste MCP handler pass-through diff for `mode`, paste threshold proof as literal log not narrative) — NOT correctness blockers. The drift detection regex hardening (R1+R2 catches), the abort-threshold logic, and the mode wiring are all unanimously verified by the trilateral; codex's residual is the same "meta-channel limit" pattern documented in v2.5.0 ship-review.
+
+Per workspace `feedback_convergence_framing.md`, this is reported as majority-verified READY (caller + 2/3 peers, 75% of 4-party convergence). Workspace HARD GATE 2026-04-26 honored to its spirit (peer review before public ship; codex+gemini+deepseek+claude all reviewed; real bugs caught by codex+gemini in R1 and codex+deepseek in R2 were fixed and verified). Codex's R5 ask classification (presentation-format, not correctness) follows the v2.5.0 path A precedent.
+
+### Scope re-framing for v2.14+ (operator directive 2026-05-04)
+
+Original v2.13 plan was 6 backlog items: (1) lead drift fix, (2) precision report, (3) active-mode auto-wire, (4) multi-peer judge consensus, (5) contest*verdict MCP action, (6) Grok integration. Operator added a 7th item mid-cycle: **per-peer on/off env vars** (`CROSS_REVIEW_V2_PEER*<NAME>=on|off`, minimum 2 enabled, lottery + dispatch filter disabled peers). Operator then judged that 6 architectural items + Grok (5th peer) + per-peer toggle = 7 items deserves a minor bump (v2.14) rather than v2.13.1. v2.13.0 ships ONLY the lead drift fix; items 2-7 ship in v2.14.0.
+
 ## [v02.12.00] - 2026-05-03
 
 **Shadow auto-wire observability — turn on the data collection that v2.11.0 shipped but left dark.** v2.11.0 delivered the relator lottery (structural safeguard against self-review) and the shadow-mode auto-wire (non-mutating judge pass), but the env vars governing the shadow pass were never set in the 5 MCP host configs, so no `session.evidence_judge_pass.shadow_decision` events were ever emitted in production. Per advisor recommendation (2026-05-03), v2.12 keeps a tight scope: turn the shadow pass on, expose the config + the resulting decision corpus through `server_info` and the dashboard, and defer the LLM-based judgment-precision report to v2.13 once a real corpus exists. v2.12 also reaffirms the cross-review-v2 mental model as a `tribunal colegiado` (operator + codex framing 2026-05-03): caller = impetrante, lead_peer = juiz relator (sorteado em v2.11+), peers = colegiado, veredito contestável via novo ciclo append-only.

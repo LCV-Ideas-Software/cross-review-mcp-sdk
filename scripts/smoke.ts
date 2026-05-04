@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// v2.13.0 (CodeQL js/insecure-temporary-file): use cryptographic entropy
+// for smoke tmpdir suffixes, not Date.now()+pid. Date.now() is
+// predictable and CodeQL flagged paths created with it as
+// `js/insecure-temporary-file` (high severity). The vulnerability path
+// is: predictable filename in os.tmpdir() → potential TOCTOU race where
+// another process pre-creates the file. Test code or not, fixing it
+// brings the alert count to 0 with negligible cost.
+function smokeTmpDir(label: string): string {
+  const suffix = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}`;
+  return path.join(os.tmpdir(), `cross-review-v2-${label}-${suffix}`);
+}
 import { checkConvergence } from "../src/core/convergence.js";
 import { loadConfig } from "../src/core/config.js";
 import { CrossReviewOrchestrator } from "../src/core/orchestrator.js";
@@ -28,10 +41,7 @@ process.env.CROSS_REVIEW_V2_STUB_CONFIRMED = "1";
 // deterministic assertions (e.g. `sweepIdle` returning a non-zero count
 // because the operator dir already had >24h-old orphans). CI matches this
 // because it runs without the env. Always force a unique tmpdir.
-process.env.CROSS_REVIEW_V2_DATA_DIR = path.join(
-  os.tmpdir(),
-  `cross-review-v2-smoke-${Date.now()}-${process.pid}`,
-);
+process.env.CROSS_REVIEW_V2_DATA_DIR = smokeTmpDir(`smoke-${process.pid}`);
 process.env.CROSS_REVIEW_OPENAI_FALLBACK_MODELS ??= "stub-codex-fallback";
 for (const provider of ["OPENAI", "ANTHROPIC", "GEMINI", "DEEPSEEK"]) {
   process.env[`CROSS_REVIEW_${provider}_INPUT_USD_PER_MILLION`] ??= "1000";
@@ -599,7 +609,7 @@ assert.equal(
 
 const financialControlsBlocked = await new CrossReviewOrchestrator({
   ...loadConfig(),
-  data_dir: path.join(os.tmpdir(), `cross-review-v2-financial-controls-${Date.now()}`),
+  data_dir: smokeTmpDir("financial-controls"),
   budget: {
     ...loadConfig().budget,
     max_session_cost_usd: undefined,
@@ -646,7 +656,7 @@ assert.equal(budgetExceeded.rounds, 1);
 
 const untilStoppedNoBudgetConfig = {
   ...loadConfig(),
-  data_dir: path.join(os.tmpdir(), `cross-review-v2-until-stopped-no-budget-${Date.now()}`),
+  data_dir: smokeTmpDir("until-stopped-no-budget"),
   budget: {
     ...loadConfig().budget,
     max_session_cost_usd: undefined,
@@ -676,7 +686,7 @@ assert.equal(untilStoppedNoBudget.rounds, 0);
 process.env.CROSS_REVIEW_V2_STUB_FORCE_REAL_COST = "1";
 const untilStoppedDefaultBudget = await new CrossReviewOrchestrator({
   ...loadConfig(),
-  data_dir: path.join(os.tmpdir(), `cross-review-v2-until-stopped-budget-${Date.now()}`),
+  data_dir: smokeTmpDir("until-stopped-budget"),
   budget: {
     ...loadConfig().budget,
     max_session_cost_usd: 1000,
@@ -732,10 +742,7 @@ assert.equal(cancelledRound.converged, false);
 assert.equal(cancelledRound.round.rejected.at(-1)?.failure_class, "cancelled");
 
 process.env.CROSS_REVIEW_V2_PREFLIGHT_MAX_ROUND_COST_USD = "0.000001";
-process.env.CROSS_REVIEW_V2_DATA_DIR = path.join(
-  os.tmpdir(),
-  `cross-review-v2-preflight-smoke-${Date.now()}`,
-);
+process.env.CROSS_REVIEW_V2_DATA_DIR = smokeTmpDir("preflight-smoke");
 const preflightOrchestrator = new CrossReviewOrchestrator(loadConfig());
 const preflightBlocked = await preflightOrchestrator.askPeers({
   task: "Verify budget preflight.",
@@ -1195,7 +1202,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   const baseConfig = loadConfig();
   const autoGrantConfig = {
     ...baseConfig,
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-auto-grant-${Date.now()}`),
+    data_dir: smokeTmpDir("auto-grant"),
     budget: {
       ...baseConfig.budget,
       preflight_max_round_cost_usd: 1000,
@@ -1246,7 +1253,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   const baseBlockedConfig = loadConfig();
   const blockedConfig = {
     ...baseBlockedConfig,
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-auto-grant-blocked-${Date.now()}`),
+    data_dir: smokeTmpDir("auto-grant-blocked"),
     budget: {
       ...baseBlockedConfig.budget,
       preflight_max_round_cost_usd: 1000,
@@ -1436,7 +1443,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   const fmtBudgetEvents: string[] = [];
   const fmtBudgetConfig = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-fmt-budget-gate-${Date.now()}`),
+    data_dir: smokeTmpDir("fmt-budget-gate"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 100,
@@ -1477,7 +1484,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   const ebEvents: string[] = [];
   const ebConfig = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-evidence-broker-${Date.now()}`),
+    data_dir: smokeTmpDir("evidence-broker"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -1554,7 +1561,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
 {
   const tpConfig = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-terminal-preservation-${Date.now()}`),
+    data_dir: smokeTmpDir("terminal-preservation"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -1700,7 +1707,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   const adEvents: string[] = [];
   const adConfig = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-address-detection-${Date.now()}`),
+    data_dir: smokeTmpDir("address-detection"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -1758,7 +1765,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
 {
   const opConfig = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-operator-status-${Date.now()}`),
+    data_dir: smokeTmpDir("operator-status"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -1827,7 +1834,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
 {
   const phConfig = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-peer-health-${Date.now()}`),
+    data_dir: smokeTmpDir("peer-health"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -1890,7 +1897,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   const judgeData: Array<Record<string, unknown> | undefined> = [];
   const judgeConfig = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-judge-verified-${Date.now()}`),
+    data_dir: smokeTmpDir("judge-verified"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -1961,7 +1968,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
 {
   const skipConfig = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-judge-skip-${Date.now()}`),
+    data_dir: smokeTmpDir("judge-skip"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -2028,7 +2035,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
 {
   const tpConfig = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-judge-terminal-${Date.now()}`),
+    data_dir: smokeTmpDir("judge-terminal"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -2162,7 +2169,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
 {
   const rmConfig = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-judge-malformed-${Date.now()}`),
+    data_dir: smokeTmpDir("judge-malformed"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -2236,7 +2243,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
     const offEvents: string[] = [];
     const offConfig = {
       ...loadConfig(),
-      data_dir: path.join(os.tmpdir(), `cross-review-v2-judge-autowire-off-${Date.now()}`),
+      data_dir: smokeTmpDir("judge-autowire-off"),
       budget: {
         ...loadConfig().budget,
         max_session_cost_usd: 10000,
@@ -2284,7 +2291,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
     const eventData: Array<Record<string, unknown> | undefined> = [];
     const cfg = {
       ...loadConfig(),
-      data_dir: path.join(os.tmpdir(), `cross-review-v2-judge-autowire-shadow-${Date.now()}`),
+      data_dir: smokeTmpDir("judge-autowire-shadow"),
       budget: {
         ...loadConfig().budget,
         max_session_cost_usd: 10000,
@@ -2364,7 +2371,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
 {
   const cfg = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-judge-shadow-no-promote-${Date.now()}`),
+    data_dir: smokeTmpDir("judge-shadow-no-promote"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -2508,7 +2515,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
   const cfg = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-relator-event-${Date.now()}`),
+    data_dir: smokeTmpDir("relator-event"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -2600,7 +2607,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
   const cfg = {
     ...loadConfig(),
-    data_dir: path.join(os.tmpdir(), `cross-review-v2-auto-recusal-${Date.now()}`),
+    data_dir: smokeTmpDir("auto-recusal"),
     budget: {
       ...loadConfig().budget,
       max_session_cost_usd: 10000,
@@ -2686,7 +2693,7 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
   try {
     const cfg = {
       ...loadConfig(),
-      data_dir: path.join(os.tmpdir(), `cross-review-v2-shadow-rollup-${Date.now()}`),
+      data_dir: smokeTmpDir("shadow-rollup"),
       budget: {
         ...loadConfig().budget,
         max_session_cost_usd: 10000,
@@ -2743,6 +2750,190 @@ assert.equal(Object.hasOwn(metrics.decision_quality, "undefined"), false);
     if (prevPeer === undefined) delete process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER;
     else process.env.CROSS_REVIEW_V2_EVIDENCE_JUDGE_AUTOWIRE_PEER = prevPeer;
   }
+}
+
+// v2.13.0 — lead_peer meta-review drift detection. When the lead's
+// generation output starts with a structured peer-review status keyword
+// (READY/NOT_READY/NEEDS_EVIDENCE), the orchestrator must emit
+// `session.lead_drift_detected` and preserve the prior draft for the
+// next round (no replacement). Two consecutive drifts must abort the
+// session with `lead_meta_review_drift`. Default `mode: "ship"` enables
+// the detection; `mode: "review"` disables it.
+{
+  const cfg = {
+    ...loadConfig(),
+    data_dir: smokeTmpDir("lead-drift"),
+    budget: {
+      ...loadConfig().budget,
+      max_session_cost_usd: 10000,
+      preflight_max_round_cost_usd: 10000,
+      until_stopped_max_cost_usd: 10000,
+    },
+  };
+  const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
+  const holder: { orch?: CrossReviewOrchestrator } = {};
+  const orch = new CrossReviewOrchestrator(cfg, (e) => {
+    events.push({ type: e.type, data: e.data });
+    holder.orch?.store.appendEvent(e);
+  });
+  holder.orch = orch;
+  // Drive runUntilUnanimous with FORCE_DRIFT (lead generation triggers
+  // drift) AND FORCE_NEEDS_EVIDENCE (reviewer keeps loop alive across
+  // rounds). caller=operator + explicit lead=claude; reviewer=codex
+  // (claude is lead, codex reviews). With initial_draft provided +
+  // max_rounds=4 the loop produces: R1 reviewer NEEDS_EVIDENCE → lead
+  // generates revision (drift 1) → R2 reviewer NEEDS_EVIDENCE on
+  // preserved prior draft → lead generates revision (drift 2) → abort.
+  const result = await orch.runUntilUnanimous({
+    task: "Test drift detection FORCE_DRIFT FORCE_NEEDS_EVIDENCE",
+    initial_draft: "Initial draft body. The lead must refine this.",
+    caller: "operator",
+    lead_peer: "claude",
+    peers: ["claude", "codex"],
+    max_rounds: 4,
+  });
+  const driftEvents = events.filter((e) => e.type === "session.lead_drift_detected");
+  assert.ok(
+    driftEvents.length >= 1,
+    `at least one session.lead_drift_detected event must fire (got ${driftEvents.length})`,
+  );
+  assert.equal(
+    (driftEvents[0].data as { lead_peer?: string } | undefined)?.lead_peer,
+    "claude",
+    "drift event must record lead_peer=claude",
+  );
+  assert.equal(result.session.outcome, "aborted");
+  assert.equal(result.session.outcome_reason, "lead_meta_review_drift");
+  console.log("[smoke] lead_drift_detected_test: PASS");
+}
+
+// v2.13.0 — JSON-shape drift detection (codex+gemini R1 catch on v2.13.0
+// ship-review). The lead's generation may emit a JSON peer-review object
+// like `{"status":"NEEDS_EVIDENCE","summary":"..."}` instead of a refined
+// draft. PATTERN_JSON_STATUS must catch that within the 200-char window.
+{
+  const cfg = {
+    ...loadConfig(),
+    data_dir: smokeTmpDir("lead-drift-json"),
+    budget: {
+      ...loadConfig().budget,
+      max_session_cost_usd: 10000,
+      preflight_max_round_cost_usd: 10000,
+      until_stopped_max_cost_usd: 10000,
+    },
+  };
+  const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
+  const holder: { orch?: CrossReviewOrchestrator } = {};
+  const orch = new CrossReviewOrchestrator(cfg, (e) => {
+    events.push({ type: e.type, data: e.data });
+    holder.orch?.store.appendEvent(e);
+  });
+  holder.orch = orch;
+  const result = await orch.runUntilUnanimous({
+    task: "Test JSON drift detection FORCE_DRIFT_JSON FORCE_NEEDS_EVIDENCE",
+    initial_draft: "Initial draft body for JSON drift test.",
+    caller: "operator",
+    lead_peer: "claude",
+    peers: ["claude", "codex"],
+    max_rounds: 4,
+  });
+  const driftEvents = events.filter((e) => e.type === "session.lead_drift_detected");
+  assert.ok(
+    driftEvents.length >= 1,
+    `JSON-shape drift must be detected (got ${driftEvents.length} events)`,
+  );
+  const firstChars = (driftEvents[0].data as { first_chars?: string } | undefined)?.first_chars;
+  assert.ok(
+    firstChars?.startsWith('{"status":"NEEDS_EVIDENCE"'),
+    `first_chars must show JSON shape (got ${firstChars?.slice(0, 40)})`,
+  );
+  assert.equal(result.session.outcome, "aborted");
+  assert.equal(result.session.outcome_reason, "lead_meta_review_drift");
+  console.log("[smoke] lead_drift_json_detected_test: PASS");
+}
+
+// v2.13.0 — markdown-fenced JSON drift detection (codex+deepseek R2
+// catch on v2.13.0 ship-review). LLMs commonly wrap JSON in ` ```json `
+// fences. PATTERN_STATUS_FIELD scans for `status:"X"` anywhere in the
+// 200-char window, no leading-brace anchor required.
+{
+  const cfg = {
+    ...loadConfig(),
+    data_dir: smokeTmpDir("lead-drift-md"),
+    budget: {
+      ...loadConfig().budget,
+      max_session_cost_usd: 10000,
+      preflight_max_round_cost_usd: 10000,
+      until_stopped_max_cost_usd: 10000,
+    },
+  };
+  const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
+  const holder: { orch?: CrossReviewOrchestrator } = {};
+  const orch = new CrossReviewOrchestrator(cfg, (e) => {
+    events.push({ type: e.type, data: e.data });
+    holder.orch?.store.appendEvent(e);
+  });
+  holder.orch = orch;
+  const result = await orch.runUntilUnanimous({
+    task: "Test markdown-fenced JSON drift FORCE_DRIFT_MD FORCE_NEEDS_EVIDENCE",
+    initial_draft: "Initial draft body for markdown drift test.",
+    caller: "operator",
+    lead_peer: "claude",
+    peers: ["claude", "codex"],
+    max_rounds: 4,
+  });
+  const driftEvents = events.filter((e) => e.type === "session.lead_drift_detected");
+  assert.ok(
+    driftEvents.length >= 1,
+    `markdown-fenced JSON drift must be detected (got ${driftEvents.length} events)`,
+  );
+  const firstChars = (driftEvents[0].data as { first_chars?: string } | undefined)?.first_chars;
+  assert.ok(
+    firstChars?.startsWith("```json"),
+    `first_chars must show markdown fence (got ${firstChars?.slice(0, 40)})`,
+  );
+  assert.equal(result.session.outcome, "aborted");
+  assert.equal(result.session.outcome_reason, "lead_meta_review_drift");
+  console.log("[smoke] lead_drift_md_detected_test: PASS");
+}
+
+// v2.13.0 — `mode: "review"` disables drift detection. With FORCE_DRIFT
+// active and mode=review, the lead's structured NEEDS_EVIDENCE output
+// is accepted as the next draft (no abort, no detection event).
+{
+  const cfg = {
+    ...loadConfig(),
+    data_dir: smokeTmpDir("lead-review-mode"),
+    budget: {
+      ...loadConfig().budget,
+      max_session_cost_usd: 10000,
+      preflight_max_round_cost_usd: 10000,
+      until_stopped_max_cost_usd: 10000,
+    },
+  };
+  const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
+  const holder: { orch?: CrossReviewOrchestrator } = {};
+  const orch = new CrossReviewOrchestrator(cfg, (e) => {
+    events.push({ type: e.type, data: e.data });
+    holder.orch?.store.appendEvent(e);
+  });
+  holder.orch = orch;
+  await orch.runUntilUnanimous({
+    task: "Test drift detection FORCE_DRIFT FORCE_NEEDS_EVIDENCE",
+    initial_draft: "Initial draft body for review mode test.",
+    caller: "operator",
+    lead_peer: "claude",
+    peers: ["claude", "codex"],
+    max_rounds: 2,
+    mode: "review",
+  });
+  const driftEvents = events.filter((e) => e.type === "session.lead_drift_detected");
+  assert.equal(
+    driftEvents.length,
+    0,
+    "no drift events when mode=review (drift detection disabled)",
+  );
+  console.log("[smoke] lead_drift_review_mode_skipped_test: PASS");
 }
 
 // v2.6.1 NOTE: smoke coverage for `peer.fallback.budget_blocked` and

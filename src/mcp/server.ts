@@ -506,6 +506,14 @@ export async function main(): Promise<void> {
           max_rounds: z.number().int().min(1).max(1000).default(8),
           until_stopped: z.boolean().default(false),
           max_cost_usd: z.number().positive().optional(),
+          // v2.13.0: ship vs review intent. `ship` (default) — initial_draft
+          // is the artifact under refinement; lead_peer produces a NEW
+          // REVISED VERSION as prose. `review` — initial_draft is the
+          // review subject; lead may emit structured responses.
+          // Disambiguates the v2.12 lead_peer meta-review drift bug
+          // when the `task` field is phrased as a review act
+          // ("Review v..."). See session.lead_drift_detected event.
+          mode: z.enum(["ship", "review"]).default("ship"),
           response_format: ResponseFormatSchema,
         })
         .strict(),
@@ -542,6 +550,8 @@ export async function main(): Promise<void> {
           max_rounds: z.number().int().min(1).max(1000).default(8),
           until_stopped: z.boolean().default(false),
           max_cost_usd: z.number().positive().optional(),
+          // v2.13.0: see run_until_unanimous for `mode` semantics.
+          mode: z.enum(["ship", "review"]).default("ship"),
           response_format: ResponseFormatSchema,
         })
         .strict(),

@@ -64,6 +64,14 @@ export interface RunUntilUnanimousInput {
   // lead_peer === caller and (b) runs the lottery to pick a non-caller
   // relator when lead_peer is omitted.
   caller?: PeerId | "operator";
+  // v2.13.0: ship vs review intent. `ship` (default) means initial_draft
+  // is the artifact under refinement — lead_peer produces a NEW REVISED
+  // VERSION as prose, NOT a structured peer-review response. `review`
+  // means initial_draft is the review subject — lead may emit structured
+  // responses. Disambiguates the v2.12 lead_peer meta-review drift bug
+  // when the `task` field is phrased as a review act ("Review v..."),
+  // which previously caused the lead to treat the call as meta-review.
+  mode?: import("./types.js").SessionMode;
 }
 
 export interface RunUntilUnanimousOutput {
@@ -282,16 +290,74 @@ function evidenceChecklistBlock(meta: SessionMeta): string[] {
   return lines;
 }
 
+// v2.13.0: drift detector — when a lead's generation output looks like
+// a structured peer-review response (status keyword or status field),
+// we treat it as meta-review drift, not a refined artifact. Three
+// recognition patterns within LEAD_DRIFT_SCAN_CHARS chars, evolved
+// across two ship-review rounds (codex+gemini R1 catch surfaced the
+// JSON-shape gap; codex+deepseek R2 catch surfaced the markdown-fence
+// gap):
+//
+//   PATTERN_KEYWORD_PREFIX matches a raw status keyword at the very
+//   start, e.g. `NEEDS_EVIDENCE\n\nsummary: ...`.
+//
+//   PATTERN_STATUS_FIELD scans for a `status: "X"` key/value pair
+//   ANYWHERE in the 200-char window (no leading-brace anchor). Catches
+//   raw JSON `{"status":"NEEDS_EVIDENCE"}`, JSON wrapped in markdown
+//   code fences (` ```json\n{...}\n``` `), JSON inside another wrapper
+//   object, and any other shape an LLM emits when it wants to return a
+//   structured peer-review response. The status keyword is anchored to
+//   one of the three valid values so a draft mentioning the literal
+//   word "status" in some other context (e.g. "this fixes the status
+//   bar bug") does not false-positive — the value also has to be one
+//   of READY|NOT_READY|NEEDS_EVIDENCE.
+//
+// Scanning only the first 200 chars keeps the false-positive rate low
+// (a real revised draft is unlikely to surface a status key/value pair
+// of the canonical form within its first 200 chars).
+const LEAD_DRIFT_PATTERN_KEYWORD_PREFIX = /^\s*[`'"]?\s*"?(READY|NOT_READY|NEEDS_EVIDENCE)\b/;
+const LEAD_DRIFT_PATTERN_STATUS_FIELD =
+  /["']?status["']?\s*:\s*["'](READY|NOT_READY|NEEDS_EVIDENCE)\b/i;
+const LEAD_DRIFT_SCAN_CHARS = 200;
+function detectLeadDrift(generationText: string): boolean {
+  const head = generationText.slice(0, LEAD_DRIFT_SCAN_CHARS);
+  return LEAD_DRIFT_PATTERN_KEYWORD_PREFIX.test(head) || LEAD_DRIFT_PATTERN_STATUS_FIELD.test(head);
+}
+
+// v2.13.0: ship-mode lead directive. Codifies for the lead_peer that
+// it is the relator producing a refined artifact (prose), NOT a peer
+// reviewer voting on the artifact. Inserted into both buildRevisionPrompt
+// and buildInitialDraftPrompt when mode === "ship". Closes the v2.12
+// lead_peer meta-review drift bug where leads emitted structured
+// NEEDS_EVIDENCE responses on "Review v..." task wording.
+function leadShipModeDirective(): string[] {
+  return [
+    "## Lead Generation Directive (ship mode)",
+    "You are the relator (lead_peer) for this session. Your job is to produce a NEW REVISED VERSION of the artifact below as plain prose / code / markdown — NOT a structured peer-review response.",
+    "",
+    "DO NOT start your output with the keywords `READY`, `NOT_READY`, or `NEEDS_EVIDENCE`. Those are peer-review status words; you are not voting in this turn — you are refining the artifact for the next peer-review round.",
+    "",
+    "DO NOT emit a JSON object with a `status` field. The peer reviewers will emit those after seeing your revised draft.",
+    "",
+    "If the artifact already addresses every outstanding ask and you cannot improve it, output it verbatim with no edits.",
+    "",
+    "Output ONLY the revised artifact text. No meeting notes, no commentary, no review summary.",
+    "",
+  ];
+}
+
 function buildRevisionPrompt(
   meta: SessionMeta,
   draft: string,
   config: AppConfig,
   reviewFocus?: string,
+  mode: import("./types.js").SessionMode = "ship",
 ): string {
   return [
     "# Cross Review - Revision For Convergence",
     "",
     ...sessionContractDirectives(),
+    ...(mode === "ship" ? leadShipModeDirective() : []),
     "Rewrite the solution considering every blocking issue and peer request.",
     "Do not ignore disagreements. Preserve what peers already accepted and fix what prevented unanimity.",
     "",
@@ -310,11 +376,17 @@ function buildRevisionPrompt(
   ].join("\n");
 }
 
-function buildInitialDraftPrompt(task: string, config: AppConfig, reviewFocus?: string): string {
+function buildInitialDraftPrompt(
+  task: string,
+  config: AppConfig,
+  reviewFocus?: string,
+  mode: import("./types.js").SessionMode = "ship",
+): string {
   return [
     "# Cross Review - First Draft",
     "",
     ...sessionContractDirectives(),
+    ...(mode === "ship" ? leadShipModeDirective() : []),
     "Create a complete first version for the task below.",
     "The version will be submitted to unanimous peer review.",
     "",
@@ -2001,6 +2073,11 @@ export class CrossReviewOrchestrator {
       }
     }
 
+    // v2.13.0: track consecutive lead drifts. After 2 in a row the
+    // session is aborted with `lead_meta_review_drift` to avoid burning
+    // budget on a stuck lead.
+    const sessionMode: import("./types.js").SessionMode = input.mode ?? "ship";
+    let consecutiveLeadDrifts = 0;
     if (!draft) {
       if (this.isCancelled(session.session_id, input.signal)) {
         this.store.markCancelled(session.session_id, "session_cancelled");
@@ -2011,7 +2088,7 @@ export class CrossReviewOrchestrator {
         };
       }
       const generation = await adapters[leadPeer].generate(
-        buildInitialDraftPrompt(input.task, this.config, input.review_focus),
+        buildInitialDraftPrompt(input.task, this.config, input.review_focus, sessionMode),
         {
           session_id: session.session_id,
           round: 0,
@@ -2023,6 +2100,31 @@ export class CrossReviewOrchestrator {
         },
       );
       this.store.saveGeneration(session.session_id, 0, generation, "initial-draft");
+      // v2.13.0: drift detection on initial-draft path. There is no
+      // prior draft to fall back to here, so a drifted initial generation
+      // aborts immediately. Only fires in `ship` mode — in `review` mode
+      // a structured response is acceptable.
+      if (sessionMode === "ship" && detectLeadDrift(generation.text)) {
+        this.emit({
+          type: "session.lead_drift_detected",
+          session_id: session.session_id,
+          round: 0,
+          peer: leadPeer,
+          message: `Lead ${leadPeer} emitted a structured peer-review response instead of a refined initial draft (likely meta-review drift on "Review v..." task wording). No prior draft to fall back to; aborting.`,
+          data: {
+            lead_peer: leadPeer,
+            round_kind: "initial-draft",
+            first_chars: generation.text.slice(0, 100),
+          },
+        });
+        this.store.finalize(session.session_id, "aborted", "lead_meta_review_drift");
+        return {
+          session: this.store.read(session.session_id),
+          final_text: undefined,
+          converged: false,
+          rounds: 0,
+        };
+      }
       draft = generation.text;
     }
 
@@ -2117,7 +2219,7 @@ export class CrossReviewOrchestrator {
 
       if (round < effectiveMaxRounds) {
         const generation = await adapters[leadPeer].generate(
-          buildRevisionPrompt(session, draft, this.config, input.review_focus),
+          buildRevisionPrompt(session, draft, this.config, input.review_focus, sessionMode),
           {
             session_id: session.session_id,
             round,
@@ -2129,7 +2231,40 @@ export class CrossReviewOrchestrator {
           },
         );
         this.store.saveGeneration(session.session_id, round, generation, "revision");
-        draft = generation.text;
+        // v2.13.0: drift detection on revision path. Unlike the initial
+        // draft path (no prior draft), here we preserve `draft` as the
+        // fallback for the next round when drift is detected. Two
+        // consecutive drifts abort the session; otherwise the count
+        // resets so a single drift does not poison subsequent rounds.
+        if (sessionMode === "ship" && detectLeadDrift(generation.text)) {
+          consecutiveLeadDrifts += 1;
+          this.emit({
+            type: "session.lead_drift_detected",
+            session_id: session.session_id,
+            round: round + 1,
+            peer: leadPeer,
+            message: `Lead ${leadPeer} emitted a structured peer-review response instead of a revised draft (consecutive drift count: ${consecutiveLeadDrifts}). Preserving prior draft for next round.`,
+            data: {
+              lead_peer: leadPeer,
+              round_kind: "revision",
+              consecutive_drifts: consecutiveLeadDrifts,
+              first_chars: generation.text.slice(0, 100),
+            },
+          });
+          if (consecutiveLeadDrifts >= 2) {
+            this.store.finalize(session.session_id, "aborted", "lead_meta_review_drift");
+            return {
+              session: this.store.read(session.session_id),
+              final_text: draft,
+              converged: false,
+              rounds: round,
+            };
+          }
+          // draft intentionally NOT replaced — keep prior version
+        } else {
+          consecutiveLeadDrifts = 0;
+          draft = generation.text;
+        }
       }
     }
 
